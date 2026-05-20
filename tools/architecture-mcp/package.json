@@ -1,0 +1,22 @@
+{
+  "name": "trading-platform-architecture-mcp",
+  "version": "1.0.0",
+  "description": "Custom Model Context Protocol (MCP) server for Trading Platform architecture governance",
+  "main": "build/index.js",
+  "type": "module",
+  "bin": {
+    "trading-platform-architecture-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.3.3"
+  }
+}

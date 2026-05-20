@@ -1,0 +1,8 @@
+# Package Dependencies
+node_modules/
+
+# Compiled JS Output
+build/
+
+# Compilation Info
+*.tsbuildinfo

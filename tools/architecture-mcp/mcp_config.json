@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "trading-platform-architecture": {
+      "command": "node",
+      "args": [
+        "/home/sai-vittal/Desktop/Trading-bot-platform/tools/architecture-mcp/build/index.js"
+      ]
+    }
+  }
+}
