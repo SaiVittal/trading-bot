@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+:root {
+  --background: hsl(222, 24%, 4%);
+  --foreground: hsl(210, 40%, 98%);
+  
+  --card: hsla(223, 20%, 10%, 0.7);
+  --border: hsla(215, 20%, 80%, 0.06);
+  --border-focus: hsla(215, 20%, 80%, 0.12);
+
+  --accent: hsl(262, 83%, 62%);
+  --cyan: hsl(190, 90%, 48%);
+  
+  --green: hsl(145, 80%, 45%);
+  --green-glow: hsla(145, 80%, 45%, 0.12);
+  --red: hsl(355, 85%, 52%);
+  --red-glow: hsla(355, 85%, 52%, 0.12);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-cyan: var(--cyan);
+  --color-green-custom: var(--green);
+  --color-red-custom: var(--red);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), sans-serif;
+  overflow-x: hidden;
+  min-height: 100vh;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.01);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Slide in animations */
+@keyframes slide-in-right {
+  from {
+    transform: translateX(40px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in-right 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Orb floating animation */
+@keyframes orb-float {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(3vw, 5vw) scale(1.05); }
+  100% { transform: translate(-2vw, -3vw) scale(0.95); }
+}
+
+.orb-animation-1 {
+  animation: orb-float 22s infinite alternate ease-in-out;
+}
+
+.orb-animation-2 {
+  animation: orb-float 26s infinite alternate ease-in-out -8s;
+}
