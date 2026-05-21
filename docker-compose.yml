@@ -55,6 +55,12 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-trading_platform}
       - REDIS_URL=redis://redis:6379/0
       - LOG_LEVEL=INFO
+      - ALPACA_API_KEY_ID=${ALPACA_API_KEY_ID}
+      - ALPACA_API_SECRET_KEY=${ALPACA_API_SECRET_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - TELEGRAM_ALERT_COOLDOWN=${TELEGRAM_ALERT_COOLDOWN}
     depends_on:
       postgres:
         condition: service_healthy

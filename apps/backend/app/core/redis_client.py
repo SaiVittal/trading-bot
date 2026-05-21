@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, Any, cast
 import redis.asyncio as aioredis
 from app.core.config import settings
 
@@ -29,7 +29,7 @@ class AsyncRedisClient:
         if not self.client:
             return False
         try:
-            return await self.client.ping()
+            return await cast(Any, self.client.ping())
         except Exception as e:
             logger.error(f"Redis health check failed: {str(e)}")
             return False

@@ -18,8 +18,14 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("New WebSocket connection accepted.")
 
+    client = redis_client.client
+    if not client:
+        logger.error("Redis client is not initialized. Closing WebSocket.")
+        await websocket.close()
+        return
+
     # Create a subscriber channel
-    pubsub = redis_client.client.pubsub()
+    pubsub = client.pubsub()
     await pubsub.subscribe(*CHANNELS)
     logger.debug(f"Subscribed WebSocket client to: {CHANNELS}")
 
@@ -42,7 +48,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         if symbol:
                             logger.info(f"Client requested dynamic subscription to: {symbol}")
                             # Broadcast to our real-time feed control plane in Redis
-                            await redis_client.client.publish(
+                            await client.publish(
                                 "market:control",
                                 json.dumps({"action": "add", "symbol": symbol})
                             )
@@ -66,16 +72,18 @@ async def websocket_endpoint(websocket: WebSocket):
             
             if message and message["type"] == "message":
                 channel = message["channel"]
-                data = json.loads(message["data"])
-                
-                # Construct combined payload
-                payload = {
-                    "channel": channel,
-                    "data": data
-                }
-                
-                # Forward to WebSocket client
-                await websocket.send_json(payload)
+                msg_data = message["data"]
+                if isinstance(msg_data, (str, bytes)):
+                    data = json.loads(msg_data)
+                    
+                    # Construct combined payload
+                    payload = {
+                        "channel": channel,
+                        "data": data
+                    }
+                    
+                    # Forward to WebSocket client
+                    await websocket.send_json(payload)
                 
             await asyncio.sleep(0.01)  # Yield CPU execution
             

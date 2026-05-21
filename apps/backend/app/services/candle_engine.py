@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 import pandas as pd
 import numpy as np
 import httpx
@@ -21,6 +21,7 @@ REDIS_ALERT_CHANNEL = "signals:alerts"
 SLACK_WEBHOOK = getattr(settings, "SLACK_WEBHOOK_URL", "")
 TG_TOKEN = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID = getattr(settings, "TELEGRAM_CHAT_ID", "")
+TG_COOLDOWN = getattr(settings, "TELEGRAM_ALERT_COOLDOWN", 120)
 
 # Standardized trading parameters mapping your yfinance bot configs
 STOCH_K_PERIOD = 5
@@ -49,6 +50,7 @@ class RealtimeCandleEngine:
         self.active_candles: Dict[str, Dict] = {}
         self.candle_start_times: Dict[str, float] = {}
         self.closed_candles_history: Dict[str, List[Dict]] = {}
+        self.last_telegram_alert_time: Dict[str, float] = {}
         
         # Active OpenAI connection
         self.openai_client = None
@@ -64,12 +66,12 @@ class RealtimeCandleEngine:
         """
         logger.info("Initializing Multi-Symbol Candle Engine with yfinance strategy parameters...")
         
-        sub_client = redis_client.pool
-        if not sub_client:
-            logger.error("Redis pool is not initialized. Cannot run Candle Engine.")
+        client = redis_client.client
+        if not client:
+            logger.error("Redis client is not initialized. Cannot run Candle Engine.")
             return
 
-        async with redis_client.client.pubsub() as pubsub:
+        async with client.pubsub() as pubsub:
             await pubsub.subscribe(REDIS_TICK_CHANNEL)
             logger.info(f"Subscribed to tick channel: {REDIS_TICK_CHANNEL}")
 
@@ -168,7 +170,9 @@ class RealtimeCandleEngine:
         df.rename(columns={
             "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"
         }, inplace=True)
-        df.set_index(pd.to_datetime(df["timestamp"], unit="s"), inplace=True)
+        timestamps = pd.to_datetime(df["timestamp"], unit="s")
+        df["Date"] = pd.Series(timestamps).dt.date
+        df.set_index(timestamps, inplace=True)
 
         # 1. Stochastic Calculation
         low_min = df["Low"].rolling(STOCH_K_PERIOD).min()
@@ -189,7 +193,6 @@ class RealtimeCandleEngine:
         # 3. Session VWAP (Resets each session / day)
         df["TP"] = (df["High"] + df["Low"] + df["Close"]) / 3
         df["TPV"] = df["TP"] * df["Volume"]
-        df["Date"] = df.index.date
         df["CumTPV"] = df.groupby("Date")["TPV"].cumsum()
         df["CumVol"] = df.groupby("Date")["Volume"].cumsum()
         df["VWAP"] = df["CumTPV"] / (df["CumVol"] + 1e-10)
@@ -240,7 +243,8 @@ class RealtimeCandleEngine:
                 max_tokens=55,
                 temperature=0.65
             )
-            return response.choices[0].message.content.strip()
+            content = response.choices[0].message.content
+            return content.strip() if content else f"Technical crossover for {symbol} at ${price:.2f} confirms momentum strategy parameters are aligned."
         except Exception as e:
             logger.warning(f"Failed to query OpenAI chat completion: {str(e)}")
             return f"Technical crossover for {symbol} at ${price:.2f} confirms momentum strategy parameters are aligned."
@@ -314,6 +318,18 @@ class RealtimeCandleEngine:
         if not TG_TOKEN or not TG_CHAT_ID or "your_telegram_bot_token" in TG_TOKEN:
             return
             
+        symbol = sig["symbol"]
+        current_time = time.time()
+        last_sent = self.last_telegram_alert_time.get(symbol, 0.0)
+        
+        # Enforce configurable Telegram alert cooldown (default: 120s)
+        if current_time - last_sent < TG_COOLDOWN:
+            logger.info(
+                f"Telegram alert for {symbol} suppressed: Cooldown active "
+                f"({current_time - last_sent:.1f}s elapsed < {TG_COOLDOWN}s required)"
+            )
+            return
+
         emoji = "🟢" if sig["action"] == "BUY" else "🔴"
         text = (
             f"{emoji} *{sig['symbol']} {sig['action']} ALERT*\n"
@@ -332,6 +348,8 @@ class RealtimeCandleEngine:
                     "text": text,
                     "parse_mode": "Markdown"
                 }, timeout=5.0)
+                # Only update last sent time upon successful transmission
+                self.last_telegram_alert_time[symbol] = current_time
                 logger.info(f"Successfully dispatched Signal Alert for {sig['symbol']} to Telegram channel!")
         except Exception as e:
             logger.error(f"Error posting Telegram alert: {str(e)}")

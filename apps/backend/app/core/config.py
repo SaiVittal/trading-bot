@@ -33,8 +33,7 @@ class Settings(BaseSettings):
     # Telegram Notification Settings
     TELEGRAM_BOT_TOKEN: Optional[str] = Field(None, validation_alias="TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID: Optional[str] = Field(None, validation_alias="TELEGRAM_CHAT_ID")
-    SLACK_WEBHOOK_URL: Optional[str] = Field(None, validation_alias="SLACK_WEBHOOK_URL")
-
+    TELEGRAM_ALERT_COOLDOWN: int = Field(120, validation_alias="TELEGRAM_ALERT_COOLDOWN")
     # Logging config
     LOG_LEVEL: str = "INFO"
 
@@ -44,4 +43,4 @@ class Settings(BaseSettings):
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
 
-settings = Settings()
+settings = Settings()  # type: ignore
