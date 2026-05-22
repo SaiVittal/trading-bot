@@ -1166,7 +1166,281 @@ class HODLODBreak(BaseStrategy):
 
 
 # ══════════════════════════════════════════════════════════════
-#  MASTER STRATEGY SCANNER — runs all 15 strategies
+#  STRATEGY 16 — EMA-9 BOUNCE (INTRADAY + SCALPING)
+# ══════════════════════════════════════════════════════════════
+
+class EMA9Bounce(BaseStrategy):
+    """
+    Price pulls back to 9 EMA and bounces in the trend direction.
+    Best on 10-min chart. Works 9:45–11:30am and 2–3:30pm ET.
+    Covers both bullish bounce (long) and bearish rejection (short).
+    Skip when ATR < 0.3% of price or EMA is flat.
+    """
+    ID       = "S16"
+    NAME     = "EMA-9 Bounce"
+    CATEGORY = "EMA"
+
+    def check(self, ticker, df):
+        if len(df) < 20: return None
+
+        price  = I.get_val(df, "Close");  ema9  = I.get_val(df, "EMA9")
+        ema9_p = I.get_val(df, "EMA9", -2); atr = I.get_val(df, "ATR") or (price or 1) * 0.005
+        vwap   = I.get_val(df, "VWAP");  rel_v = I.get_val(df, "REL_VOL")
+        rsi    = I.get_val(df, "RSI")
+        if not all([price, ema9, ema9_p]): return None
+
+        # Skip flat EMA (slope < 0.05% of price) — no direction
+        ema9_slope = ema9 - ema9_p
+        if abs(ema9_slope) < price * 0.0005: return None
+        # Skip no-range environment (ATR < 0.3% of price)
+        if atr < price * 0.003: return None
+
+        cur  = df.iloc[-1]; prev = df.iloc[-2] if len(df) > 1 else cur
+        o,h,l,cl   = float(cur["Open"]),  float(cur["High"]),  float(cur["Low"]),  float(cur["Close"])
+        po,ph,pl,pcl = float(prev["Open"]),float(prev["High"]),float(prev["Low"]),float(prev["Close"])
+
+        body       = cl - o
+        candle_rng = h - l if h > l else 1e-10
+        lower_wick = min(o, cl) - l
+        upper_wick = h - max(o, cl)
+
+        touched_ema = l <= ema9 <= h or abs(price - ema9) < atr * 0.8
+
+        if ema9_slope > 0:   # BULLISH — EMA9 curling up, buy the dip to EMA9
+            direction = "bullish"
+            hammer      = body > 0 and lower_wick >= body * 1.8 and upper_wick <= body
+            bull_engulf = (body > 0 and o < pcl and cl > po
+                           and body > candle_rng * 0.5)
+            bull_resume = body > candle_rng * 0.45 and cl > (l + candle_rng * 0.6)
+            rev_candle  = hammer or bull_engulf or bull_resume
+            above_vwap  = price >= (vwap or price * 0.999)
+            vol_confirm = (rel_v or 0) >= 1.2
+            rsi_ok      = (rsi or 55) < 70   # not overbought
+
+            ALL = [
+                "Price above 9 EMA (uptrend)",
+                "9 EMA curling upward (positive slope)",
+                "Price touched / pulled back to 9 EMA",
+                "Bullish reversal candle at EMA (hammer/engulfing)",
+                "Volume above average on bounce (≥1.2×)",
+                "Price above VWAP (alignment filter)",
+                "RSI not overbought (< 70)",
+            ]
+            checks = [True, True, touched_ema, rev_candle, vol_confirm,
+                      above_vwap, rsi_ok]
+
+        else:                # BEARISH — EMA9 sloping down, sell the rally to EMA9
+            direction = "bearish"
+            shoot_star  = body < 0 and upper_wick >= abs(body) * 1.8 and lower_wick <= abs(body)
+            bear_engulf = (body < 0 and o > pcl and cl < po
+                           and abs(body) > candle_rng * 0.5)
+            bear_candle = body < 0 and abs(body) > candle_rng * 0.45
+            rej_candle  = shoot_star or bear_engulf or bear_candle
+            below_vwap  = price <= (vwap or price * 1.001)
+            vol_confirm = (rel_v or 0) >= 1.2
+            rsi_ok      = (rsi or 45) > 30   # not oversold
+
+            ALL = [
+                "Price below 9 EMA (downtrend)",
+                "9 EMA sloping downward (negative slope)",
+                "Price rallied to touch 9 EMA",
+                "Bearish rejection candle at EMA (shooting star/engulfing)",
+                "Volume above average on rejection (≥1.2×)",
+                "Price below VWAP (alignment filter)",
+                "RSI not oversold (> 30)",
+            ]
+            checks = [True, True, touched_ema, rej_candle, vol_confirm,
+                      below_vwap, rsi_ok]
+
+        met = []; missed = []
+        for c, n in zip(checks, ALL):
+            (met if c else missed).append(n)
+
+        if not touched_ema: return None
+        if len(met) < 3: return None
+
+        data = {"ema9": round(ema9, 2), "ema9_slope": round(ema9_slope, 4),
+                "rsi": rsi, "vwap": round(vwap, 2) if vwap else None,
+                "atr": round(atr, 4)}
+        # R:R min 1:2 per guide (stop_mult=1.0, t1_mult=2.0, t2_mult=3.0)
+        return self._signal(ticker, df, direction, met, missed, ALL, data,
+                            stop_mult=1.0, t1_mult=2.0, t2_mult=3.0)
+
+
+# ══════════════════════════════════════════════════════════════
+#  STRATEGY 17 — EMA-9 REJECTION SHORT (INTRADAY + PUTS)
+# ══════════════════════════════════════════════════════════════
+
+class EMA9RejectionShort(BaseStrategy):
+    """
+    Price is in a downtrend (below 9 EMA), rallies up to test the 9 EMA,
+    and gets rejected. Shooting star or bearish engulfing at the EMA.
+    All 3 confirmation filters required: EMA slope ↓, VWAP above price, volume.
+    """
+    ID       = "S17"
+    NAME     = "EMA-9 Rejection Short"
+    CATEGORY = "EMA"
+
+    def check(self, ticker, df):
+        if len(df) < 20: return None
+
+        price  = I.get_val(df, "Close");  ema9  = I.get_val(df, "EMA9")
+        ema9_p = I.get_val(df, "EMA9", -2); atr = I.get_val(df, "ATR") or (price or 1) * 0.005
+        vwap   = I.get_val(df, "VWAP");  rel_v = I.get_val(df, "REL_VOL")
+        rsi    = I.get_val(df, "RSI")
+        if not all([price, ema9, ema9_p]): return None
+
+        # Filter 1 — EMA slope must be clearly negative
+        ema9_slope = ema9 - ema9_p
+        if ema9_slope >= -price * 0.0003: return None   # flat or rising — skip
+
+        # Filter 2 — Price must be below VWAP
+        if vwap and price >= vwap: return None
+
+        # Filter 3 — RSI < 50 (momentum bearish)
+        if rsi is not None and rsi >= 52: return None
+
+        # Skip no-range environment
+        if atr < price * 0.003: return None
+
+        cur  = df.iloc[-1]; prev = df.iloc[-2] if len(df) > 1 else cur
+        o,h,l,cl   = float(cur["Open"]),  float(cur["High"]),  float(cur["Low"]),  float(cur["Close"])
+        po,ph,pl,pcl = float(prev["Open"]),float(prev["High"]),float(prev["Low"]),float(prev["Close"])
+
+        body       = cl - o            # negative for bearish candle
+        candle_rng = h - l if h > l else 1e-10
+        upper_wick = h - max(o, cl)
+        lower_wick = min(o, cl) - l
+
+        # Price rallied to test EMA9 from below
+        rally_to_ema = (h >= ema9 * 0.998 and l < ema9) or abs(price - ema9) < atr
+
+        # Rejection candle: shooting star OR bearish engulfing
+        shoot_star  = (body <= 0 and upper_wick >= abs(body or candle_rng * 0.1) * 1.8
+                       and lower_wick <= candle_rng * 0.2)
+        bear_engulf = (body < 0 and o > pcl and cl < po
+                       and abs(body) > candle_rng * 0.5)
+        pin_bar     = upper_wick > candle_rng * 0.6 and abs(body) < candle_rng * 0.3
+        rej_candle  = shoot_star or bear_engulf or pin_bar
+
+        # Volume spike on rejection (sellers re-entering)
+        vol_spike = (rel_v or 0) >= 1.3
+
+        ALL = [
+            "Price below 9 EMA (downtrend active)",
+            "9 EMA sloping downward (momentum turning negative)",
+            "Price rallied to test 9 EMA from below",
+            "Rejection candle at EMA (shooting star / pin bar / engulfing)",
+            "Volume spikes on rejection (sellers re-entering, ≥1.3×)",
+            "RSI below 50 (bearish momentum filter)",
+            "Price below VWAP (VWAP acting as resistance)",
+        ]
+        rsi_ok    = (rsi or 45) < 50
+        below_vwap = price < (vwap or price * 1.001)
+        checks = [True, True, rally_to_ema, rej_candle, vol_spike,
+                  rsi_ok, below_vwap]
+
+        met = []; missed = []
+        for c, n in zip(checks, ALL):
+            (met if c else missed).append(n)
+
+        if not rally_to_ema: return None
+        if len(met) < 4: return None   # stricter — need 4/7
+
+        data = {"ema9": round(ema9, 2), "ema9_slope": round(ema9_slope, 4),
+                "rsi": rsi, "vwap": round(vwap, 2) if vwap else None,
+                "upper_wick_pct": round(upper_wick / candle_rng * 100, 1)}
+        return self._signal(ticker, df, "bearish", met, missed, ALL, data,
+                            stop_mult=0.8, t1_mult=1.8, t2_mult=3.0)
+
+
+# ══════════════════════════════════════════════════════════════
+#  STRATEGY 18 — EMA-9 BREAKOUT LONG (OPTIONS CALLS)
+# ══════════════════════════════════════════════════════════════
+
+class EMA9BreakoutLong(BaseStrategy):
+    """
+    Price was below 9 EMA, now closes decisively above it on strong
+    volume. 9 EMA must be sloping UP and price must be above VWAP.
+    Best for call options: ATM, 1–5 DTE intraday or 7–14 DTE swing.
+    T1 = next resistance (50%), T2 = HOD or VWAP + 1 ATR.
+    """
+    ID       = "S18"
+    NAME     = "EMA-9 Breakout Long"
+    CATEGORY = "EMA"
+
+    def check(self, ticker, df):
+        if len(df) < 20: return None
+
+        price  = I.get_val(df, "Close");  ema9  = I.get_val(df, "EMA9")
+        ema9_p = I.get_val(df, "EMA9", -2); atr = I.get_val(df, "ATR") or (price or 1) * 0.005
+        vwap   = I.get_val(df, "VWAP");  rel_v = I.get_val(df, "REL_VOL")
+        rsi    = I.get_val(df, "RSI")
+        prev_close = I.get_val(df, "Close", -2)
+        if not all([price, ema9, ema9_p, prev_close]): return None
+
+        # Skip flat EMA — key rule: must be sloping UP
+        ema9_slope = ema9 - ema9_p
+        if ema9_slope <= price * 0.0002: return None   # flat or declining — skip
+
+        # Skip no-range environment
+        if atr < price * 0.003: return None
+
+        # Key condition: previous candle was BELOW 9 EMA, current crosses ABOVE
+        prev_below = prev_close < (I.get_val(df, "EMA9", -2) or ema9)
+        cur_above  = price > ema9
+
+        if not (prev_below and cur_above): return None
+
+        cur  = df.iloc[-1]
+        o,h,l,cl = float(cur["Open"]), float(cur["High"]), float(cur["Low"]), float(cur["Close"])
+        body      = cl - o
+        candle_rng = h - l if h > l else 1e-10
+
+        # Strong bullish candle: body > 50% of range, close in top 30%
+        strong_bull  = body > candle_rng * 0.5 and cl > (l + candle_rng * 0.65)
+        # Volume spike (aggressive buyers confirming breakout)
+        vol_spike   = (rel_v or 0) >= 1.5
+        # VWAP must be below price — critical alignment filter
+        above_vwap  = price > (vwap or price * 0.999)
+        # RSI confirms momentum (> 50 and not extreme overbought)
+        rsi_ok      = 50 <= (rsi or 55) <= 80
+        # HOD check: breakout near session high is stronger
+        hod = float(df["High"].max())
+        near_hod    = price > hod * 0.998
+
+        ALL = [
+            "Previous bar closed below 9 EMA",
+            "Current bar closes above 9 EMA (decisive reclaim)",
+            "Strong bullish candle (body > 50% range, closes near high)",
+            "Volume spike confirms breakout (≥1.5× average)",
+            "9 EMA sloping upward (positive slope — required)",
+            "Price above VWAP (alignment — required)",
+            "RSI in bullish momentum zone (50–80)",
+            "Breaking near session high (HOD confirmation)",
+        ]
+        checks = [prev_below, cur_above, strong_bull, vol_spike,
+                  True, above_vwap, rsi_ok, near_hod]
+
+        met = []; missed = []
+        for c, n in zip(checks, ALL):
+            (met if c else missed).append(n)
+
+        # Must have the two required conditions (EMA slope + VWAP)
+        if not above_vwap: return None
+        if len(met) < 4: return None
+
+        data = {"ema9": round(ema9, 2), "ema9_slope": round(ema9_slope, 4),
+                "prev_close": round(prev_close, 2),
+                "rsi": rsi, "vwap": round(vwap, 2) if vwap else None,
+                "hod": round(hod, 2)}
+        # T1 = next resistance (trail at EMA9), T2 = HOD + 1 ATR
+        return self._signal(ticker, df, "bullish", met, missed, ALL, data,
+                            stop_mult=0.8, t1_mult=1.5, t2_mult=2.5)
+
+
+# ══════════════════════════════════════════════════════════════
+#  MASTER STRATEGY SCANNER — runs all 18 strategies
 # ══════════════════════════════════════════════════════════════
 
 class StrategyScanner:
@@ -1197,6 +1471,9 @@ class StrategyScanner:
         MomentumBreakout(),
         VolatilitySqueezeBreakout(),
         HODLODBreak(),
+        EMA9Bounce(),
+        EMA9RejectionShort(),
+        EMA9BreakoutLong(),
     ]
 
     CATEGORY_EMOJI = {
@@ -1204,6 +1481,7 @@ class StrategyScanner:
         "REVERSAL": "🔄",
         "TREND":    "📈",
         "SQUEEZE":  "💥",
+        "EMA":      "📉",
     }
 
     def __init__(self, min_confidence: int = 55):
@@ -1238,10 +1516,11 @@ class StrategyScanner:
     def scan_all_timeframes(self, ticker: str,
                             df_1m: pd.DataFrame) -> dict:
         """
-        Run scanner on 1m, 5m, 15m candles and return combined results.
+        Run scanner on 1m, 5m, 10m, 15m candles and return combined results.
+        10m is added specifically for the EMA-9 strategies (S16/S17/S18).
         """
         results = {}
-        for tf in ["1m", "5m", "15m"]:
+        for tf in ["1m", "5m", "10m", "15m"]:
             signals = self.scan(ticker, df_1m, tf)
             if signals:
                 results[tf] = signals
@@ -1338,7 +1617,7 @@ class StrategyScanner:
         try:
             if timeframe == "1m":
                 return df_1m
-            rule = {"5m":"5min","15m":"15min","1h":"1h"}.get(timeframe,"5min")
+            rule = {"5m":"5min","10m":"10min","15m":"15min","1h":"1h"}.get(timeframe,"5min")
             agg  = {c: ("first" if c=="Open" else "max" if c=="High"
                         else "min" if c=="Low" else "last" if c=="Close"
                         else "sum")

@@ -43,19 +43,24 @@ CANDLE_HISTORY_SIZE = 1440   # 2 h of 5-second candles
 ET = pytz.timezone("America/New_York")
 
 # Strategies active in each intraday session window (Part 11 of guide)
-_ALL_15 = {"S01","S02","S03","S04","S05","S06","S07",
-           "S08","S09","S10","S11","S12","S13","S14","S15"}
+_ALL_18 = {"S01","S02","S03","S04","S05","S06","S07",
+           "S08","S09","S10","S11","S12","S13","S14","S15",
+           "S16","S17","S18"}
+
+# S16/S17/S18 (9 EMA strategies) best: 9:45–11:30am and 2–3:30pm ET
+# Guide explicitly says skip 12pm–2pm lunch chop for these
+_EMA9 = {"S16","S17","S18"}
 
 SESSION_MAP: List[tuple] = [
     # (start, end, allowed_strategy_ids)
-    (dtime(9, 30), dtime(9, 35),  set()),                            # wild open — observe only
-    (dtime(9, 35), dtime(10, 0),  {"S03","S04","S08","S13"}),        # opening momentum
-    (dtime(10, 0), dtime(11, 0),  _ALL_15),                          # primary session
-    (dtime(11, 0), dtime(12, 0),  {"S01","S02","S11","S12"}),        # mid-morning
-    (dtime(12, 0), dtime(14, 0),  {"S05"}),                          # lunch — MR only
-    (dtime(14, 0), dtime(15, 0),  {"S01","S02","S11","S12","S15"}),  # afternoon resume
-    (dtime(15, 0), dtime(15, 45), {"S08","S13","S15"}),              # power hour
-    (dtime(15,45), dtime(16, 0),  set()),                            # close — exit only
+    (dtime(9, 30), dtime(9, 35),  set()),                                      # wild open — observe only
+    (dtime(9, 35), dtime(10, 0),  {"S03","S04","S08","S13"}),                  # opening momentum
+    (dtime(10, 0), dtime(11, 0),  _ALL_18),                                    # primary session (all 18)
+    (dtime(11, 0), dtime(12, 0),  {"S01","S02","S11","S12"} | _EMA9),          # mid-morning + EMA9
+    (dtime(12, 0), dtime(14, 0),  {"S05"}),                                    # lunch — MR only, skip EMA9
+    (dtime(14, 0), dtime(15, 30), {"S01","S02","S11","S12","S15"} | _EMA9),    # afternoon + EMA9
+    (dtime(15,30), dtime(15, 45), {"S08","S13","S15"}),                        # power hour close
+    (dtime(15,45), dtime(16, 0),  set()),                                       # close — exit only
 ]
 
 
@@ -68,14 +73,18 @@ def _session_allowed(now_et: datetime) -> Set[str]:
     return set()   # outside market hours
 
 
-# Per-strategy minimum confidence (Part 7 of guide)
+# Per-strategy minimum confidence (Part 7 of guide + S16/S17/S18 from EMA guide)
 STRATEGY_MIN_CONF: Dict[str, int] = {
     "S01": 55, "S02": 55, "S03": 55, "S04": 55, "S05": 50,
     "S06": 60, "S07": 60, "S08": 60, "S09": 55, "S10": 55,
     "S11": 55, "S12": 55, "S13": 60, "S14": 65, "S15": 60,
+    # EMA-9 strategies: require all 3 confirmation filters — higher thresholds
+    "S16": 60,   # EMA-9 Bounce: slope + VWAP + volume all needed
+    "S17": 65,   # EMA-9 Rejection Short: RSI < 50 + VWAP + volume + slope
+    "S18": 65,   # EMA-9 Breakout Long: 4 required conditions (slope UP + VWAP mandatory)
 }
 
-CATEGORY_EMOJI = {"VWAP": "💧", "REVERSAL": "🔄", "TREND": "📈", "SQUEEZE": "💥"}
+CATEGORY_EMOJI = {"VWAP": "💧", "REVERSAL": "🔄", "TREND": "📈", "SQUEEZE": "💥", "EMA": "📉"}
 
 
 class RealtimeCandleEngine:
@@ -118,7 +127,7 @@ class RealtimeCandleEngine:
     # ──────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        logger.info("Initializing Multi-Symbol Candle Engine (15 strategies)...")
+        logger.info("Initializing Multi-Symbol Candle Engine (18 strategies)...")
         client = redis_client.client
         if not client:
             logger.error("Redis client not initialized. Cannot run Candle Engine.")
@@ -218,7 +227,7 @@ class RealtimeCandleEngine:
             logger.debug(f"{symbol}: outside trading session at {now_et.strftime('%H:%M ET')} — skipped.")
             return
 
-        # ── Run all 15 strategies across 1m / 5m / 15m ──────────
+        # ── Run all 18 strategies across 1m / 5m / 10m / 15m ────
         try:
             all_tf = self._scanner.scan_all_timeframes(symbol, df_raw)
         except Exception as e:
