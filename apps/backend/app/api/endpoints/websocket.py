@@ -84,5 +84,5 @@ async def websocket_endpoint(websocket: WebSocket):
         running = False
         receiver_task.cancel()
         await pubsub.unsubscribe(*CHANNELS)
-        await pubsub.close()
+        await pubsub.aclose()
         logger.info("WebSocket cleaned up.")
