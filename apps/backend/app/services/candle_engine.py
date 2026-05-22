@@ -27,6 +27,7 @@ from app.services.bot_upgrade import (
     VolatilityEngine,
 )
 from app.services.strategy_engine import StrategyScanner, StrategySignal
+from app.services.opening_drive import OpeningDriveModule, OpeningDriveSignal
 
 logger = logging.getLogger("app.services.candle_engine")
 
@@ -84,7 +85,10 @@ STRATEGY_MIN_CONF: Dict[str, int] = {
     "S18": 65,   # EMA-9 Breakout Long: 4 required conditions (slope UP + VWAP mandatory)
 }
 
-CATEGORY_EMOJI = {"VWAP": "💧", "REVERSAL": "🔄", "TREND": "📈", "SQUEEZE": "💥", "EMA": "📉"}
+CATEGORY_EMOJI = {"VWAP": "💧", "REVERSAL": "🔄", "TREND": "📈", "SQUEEZE": "💥", "EMA": "📉", "OPENING_DRIVE": "🚀"}
+
+# Opening Drive: only 9:30–10:30 ET (first hour only)
+OPENING_DRIVE_WINDOW = (dtime(9, 30), dtime(10, 30))
 
 
 class RealtimeCandleEngine:
@@ -108,6 +112,9 @@ class RealtimeCandleEngine:
         self._risk       = RiskEngine()
         self._insight    = InsightGenerator()
         self._formatter  = AlertFormatter()
+        self._od_module      = OpeningDriveModule(min_confidence=55, min_rvol=3.0, min_gap_pct=3.0)
+        self.prior_closes:   Dict[str, float] = {}   # symbol → prior session close
+        self.session_dates:  Dict[str, object] = {}  # symbol → last seen date
 
         # Optional OpenAI
         self._openai = None
@@ -179,6 +186,14 @@ class RealtimeCandleEngine:
             if symbol not in self.closed_candles_history:
                 self.closed_candles_history[symbol] = deque(maxlen=CANDLE_HISTORY_SIZE)
             self.closed_candles_history[symbol].append(active)
+
+            # Track date change to capture prior close
+            from datetime import date as _date
+            bar_date = _date.fromtimestamp(timestamp)
+            if symbol in self.session_dates and self.session_dates[symbol] != bar_date:
+                # New trading day — store yesterday's last close
+                self.prior_closes[symbol] = float(active["close"])
+            self.session_dates[symbol] = bar_date
 
             await self.evaluate_strategy_checklist(symbol)
 
@@ -282,6 +297,16 @@ class RealtimeCandleEngine:
             prob_data    = self._prob.run(mtf_data, df, vol_data, volume_data, candle_data)
             mtf_targets  = self._compute_mtf_targets(df_raw)
 
+            # Opening Drive scan (9:30–10:30 ET only)
+            od_signals: List[OpeningDriveSignal] = []
+            od_start, od_end = OPENING_DRIVE_WINDOW
+            if od_start <= now_et.time() < od_end:
+                try:
+                    prior_close = self.prior_closes.get(symbol)
+                    od_signals  = self._od_module.scan(symbol, df_raw, prior_close)
+                except Exception as e:
+                    logger.warning(f"Opening Drive scan failed for {symbol}: {e}")
+
             # Use upgrade engine confidence as secondary filter if configured
             if prob_data["confidence"] < settings.MIN_CONFIDENCE and len(signals) < 2:
                 logger.info(
@@ -315,6 +340,7 @@ class RealtimeCandleEngine:
                            "support": [], "resistance": [], "atr": 0, "sr_target": None}
             insight_txt = f"Strategy cluster for {symbol} — {len(signals)} signal(s) fired."
             mtf_targets  = self._compute_mtf_targets(df_raw)
+            od_signals: List[OpeningDriveSignal] = []
 
         # ── Build alert payloads ──────────────────────────────────
         strategy_summary = ", ".join(
@@ -367,6 +393,7 @@ class RealtimeCandleEngine:
             "message":            legacy_str,
             "ai_insight":         insight_txt,
             "mtf_targets":        mtf_targets,
+            "od_signals":         [self._od_signal_to_dict(s) for s in od_signals],
             "timestamp":          time.time(),
         }
 
@@ -577,6 +604,27 @@ class RealtimeCandleEngine:
                 )
         mtf_section = "\n".join(mtf_lines) if mtf_lines else "  N/A"
 
+        # Opening Drive alert section
+        od_section = ""
+        od_list    = sig.get("od_signals", [])
+        if od_list:
+            od_lines = []
+            for od in od_list:
+                star  = " ⭐ PREMIUM" if od.get("premium_setup") else ""
+                gap   = od.get("gap_pct", 0)
+                rvol  = od.get("rvol", 0)
+                rq    = od.get("rvol_quality", "").upper()
+                ph    = od.get("pm_high")
+                pmh_s = f" | PM High ${ph}" if ph else ""
+                od_lines.append(
+                    f"🚀 *[{od['strategy_id']}] {od['strategy_name']}*{star}\n"
+                    f"   Gap: {gap:+.1f}% | RVOL: {rvol:.1f}× ({rq}){pmh_s}\n"
+                    f"   Entry: ${od['entry']:.2f} | Stop: ${od['stop']:.2f} | "
+                    f"T1: ${od['t1']:.2f} | T2: ${od['t2']:.2f} | R:R 1:{od['rr']}\n"
+                    f"   Conf: {od['confidence']}/100 | {od['score']}/{od['max_score']} conditions"
+                )
+            od_section = "\n\n📊 *Opening Drive Alerts:*\n" + "\n\n".join(od_lines)
+
         text = (
             f"{emoji} *{symbol} {sig['action']} ALERT* — {sig['session_time']}\n"
             f"─────────────────────────────\n"
@@ -592,7 +640,8 @@ class RealtimeCandleEngine:
             f"Patterns: {patterns}\n\n"
             f"📊 *Multi-Timeframe Price Targets:*\n"
             f"_TF  | Trend | ↑ Higher High  ↓ Lower Low_\n"
-            f"{mtf_section}\n\n"
+            f"{mtf_section}"
+            f"{od_section}\n\n"
             f"🧠 *AI Insight:* _{sig['ai_insight']}_\n\n"
             f"⚠ _Educational only — not financial advice_"
         )
@@ -637,6 +686,31 @@ class RealtimeCandleEngine:
                  "stoch_signal":"neutral","stoch_k":None}
         return {"timeframes": {tf: empty for tf in ["base","5m","15m","1h"]},
                 "dominant": direction, "aligned_tfs": 0, "alignment_pct": 0}
+
+    @staticmethod
+    def _od_signal_to_dict(sig: OpeningDriveSignal) -> dict:
+        return {
+            "strategy_id":    sig.strategy_id,
+            "strategy_name":  sig.strategy_name,
+            "variant":        sig.variant,
+            "direction":      sig.direction,
+            "price":          sig.price,
+            "entry":          sig.entry,
+            "stop":           sig.stop,
+            "t1":             sig.t1,
+            "t2":             sig.t2,
+            "rr":             sig.rr,
+            "confidence":     sig.confidence,
+            "conditions_met": sig.conditions_met,
+            "score":          sig.score,
+            "max_score":      sig.max_score,
+            "rvol":           sig.rvol,
+            "gap_pct":        sig.gap_pct,
+            "premium_setup":  sig.premium_setup,
+            "pm_high":        sig.pm_data.get("pm_high") if sig.pm_data else None,
+            "pm_sr_levels":   sig.pm_data.get("pm_sr_levels", []) if sig.pm_data else [],
+            "rvol_quality":   sig.pm_data.get("rvol_quality","") if sig.pm_data else "",
+        }
 
     # ──────────────────────────────────────────────────────────────
     #  Multi-timeframe price projection (HH / LL targets per TF)
