@@ -28,6 +28,7 @@ from app.services.bot_upgrade import (
 )
 from app.services.strategy_engine import StrategyScanner, StrategySignal
 from app.services.opening_drive import OpeningDriveModule, OpeningDriveSignal
+from app.services.price_fix import is_price_sane, validate_dataframe
 
 logger = logging.getLogger("app.services.candle_engine")
 
@@ -224,6 +225,9 @@ class RealtimeCandleEngine:
         idx = pd.to_datetime(df["timestamp"], unit="s", utc=True)
         df.set_index(idx, inplace=True)
         df.drop(columns=["symbol", "timestamp"], errors="ignore", inplace=True)
+        # Price sanity: reject DataFrames with stuck feeds or out-of-range prices
+        if not validate_dataframe(symbol, df):
+            return None
         return df
 
     # ──────────────────────────────────────────────────────────────
@@ -278,6 +282,14 @@ class RealtimeCandleEngine:
                          key=lambda s: (s.direction != direction, -s.confidence))
         top = signals[0]
         action = "BUY" if direction == "bullish" else "SELL"
+
+        # ── Price sanity guard — never alert with wrong price ─────
+        if not is_price_sane(symbol, top.price):
+            logger.warning(
+                f"{symbol}: alert suppressed — price ${top.price:.2f} failed sanity check. "
+                "Register a range in price_fix.PRICE_RANGES or check your data feed."
+            )
+            return
 
         logger.info(
             f"{symbol}: {len(signals)} strategy signal(s) fired "
