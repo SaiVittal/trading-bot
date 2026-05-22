@@ -271,6 +271,7 @@ class RealtimeCandleEngine:
             vol_data     = self._volatility.run(df)
             volume_data  = self._volume.run(df)
             prob_data    = self._prob.run(mtf_data, df, vol_data, volume_data, candle_data)
+            mtf_targets  = self._compute_mtf_targets(df_raw)
 
             # Use upgrade engine confidence as secondary filter if configured
             if prob_data["confidence"] < settings.MIN_CONFIDENCE and len(signals) < 2:
@@ -304,6 +305,7 @@ class RealtimeCandleEngine:
                            "expected_high": round(top.price + float(atr or top.price*0.005)*2.5, 2),
                            "support": [], "resistance": [], "atr": 0, "sr_target": None}
             insight_txt = f"Strategy cluster for {symbol} — {len(signals)} signal(s) fired."
+            mtf_targets  = self._compute_mtf_targets(df_raw)
 
         # ── Build alert payloads ──────────────────────────────────
         strategy_summary = ", ".join(
@@ -324,7 +326,7 @@ class RealtimeCandleEngine:
         slack_payload = self._build_slack_payload(
             symbol, direction, signals, top, risk_data,
             prob_data, range_data, vol_data, volume_data,
-            candle_data, insight_txt, bull, bear,
+            candle_data, insight_txt, bull, bear, mtf_targets,
         )
 
         alert_payload = {
@@ -355,6 +357,7 @@ class RealtimeCandleEngine:
             "session_time":       now_et.strftime("%H:%M ET"),
             "message":            legacy_str,
             "ai_insight":         insight_txt,
+            "mtf_targets":        mtf_targets,
             "timestamp":          time.time(),
         }
 
@@ -386,6 +389,7 @@ class RealtimeCandleEngine:
         risk: dict, prob: dict, rng: dict,
         vol: dict, volume: dict, candles: dict,
         insight: str, bull: int, bear: int,
+        mtf_targets: Optional[List[dict]] = None,
     ) -> dict:
         emoji  = "🟢" if direction == "bullish" else "🔴"
         color  = "#1D9E75" if direction == "bullish" else "#a32d2d"
@@ -434,9 +438,26 @@ class RealtimeCandleEngine:
                      + (f"\n*Not met:*\n{missed}" if missed else "")}},
             {"type": "section", "text": {"type": "mrkdwn",
              "text": f"*🧠 AI Insight*\n_{insight}_"}},
-            {"type": "context", "elements": [{"type": "mrkdwn",
-             "text": "⚠ Educational only — not financial advice"}]},
         ]
+
+        # MTF price target table
+        if mtf_targets:
+            _TI = {"bullish": "📈", "bearish": "📉", "neutral": "➡", "n/a": "❓"}
+            rows = []
+            for r in mtf_targets:
+                ti = _TI.get(r.get("trend", "n/a"), "❓")
+                hh = r.get("proj_hh"); ll = r.get("proj_ll")
+                tf = r.get("tf", "?")
+                if hh and ll:
+                    rsi_s = f" RSI:{r['rsi']:.0f}" if r.get("rsi") else ""
+                    rows.append(f"`{tf:<3}` {ti}  ↑${hh}  ↓${ll}{rsi_s}")
+            if rows:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                    "text": "*📊 Multi-Timeframe Targets* (↑ Higher High  ↓ Lower Low)\n"
+                            + "\n".join(rows)}})
+
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
+             "text": "⚠ Educational only — not financial advice"}]})
         return {
             "text": f"{emoji} {symbol} {direction.upper()} @ ${top.price} "
                     f"({len(signals)} strategies aligned)",
@@ -524,6 +545,29 @@ class RealtimeCandleEngine:
         rng_str    = f"${exp[0]} → ${exp[1]}" if len(exp) == 2 else "N/A"
         patterns   = ", ".join(p.replace("_", " ") for p in sig.get("patterns", [])) or "None"
 
+        # ── Multi-timeframe target table ──────────────────────────
+        _TREND_ICON = {"bullish": "📈", "bearish": "📉", "neutral": "➡", "n/a": "❓"}
+        mtf_lines = []
+        for row in sig.get("mtf_targets", []):
+            tf    = row.get("tf", "?")
+            ticon = _TREND_ICON.get(row.get("trend", "n/a"), "❓")
+            hh    = row.get("proj_hh")
+            ll    = row.get("proj_ll")
+            rsi   = row.get("rsi")
+            if hh is None or ll is None:
+                mtf_lines.append(f"`{tf:<3}` {ticon}  —  insufficient data")
+            elif tf == "1d":
+                mtf_lines.append(
+                    f"`{tf:<3}` {ticon}  Hi ${row['swing_high']}  Lo ${row['swing_low']}"
+                    f"  →  ↑${hh}  ↓${ll}"
+                )
+            else:
+                rsi_str = f"  RSI:{rsi:.0f}" if rsi is not None else ""
+                mtf_lines.append(
+                    f"`{tf:<3}` {ticon}  ↑${hh}  ↓${ll}{rsi_str}"
+                )
+        mtf_section = "\n".join(mtf_lines) if mtf_lines else "  N/A"
+
         text = (
             f"{emoji} *{symbol} {sig['action']} ALERT* — {sig['session_time']}\n"
             f"─────────────────────────────\n"
@@ -537,6 +581,9 @@ class RealtimeCandleEngine:
             f"*Conditions met:*\n{conditions}\n\n"
             f"Confidence: {sig['confidence']}/100 | Vol regime: {sig['vol_regime'].upper()}\n"
             f"Patterns: {patterns}\n\n"
+            f"📊 *Multi-Timeframe Price Targets:*\n"
+            f"_TF  | Trend | ↑ Higher High  ↓ Lower Low_\n"
+            f"{mtf_section}\n\n"
             f"🧠 *AI Insight:* _{sig['ai_insight']}_\n\n"
             f"⚠ _Educational only — not financial advice_"
         )
@@ -581,6 +628,137 @@ class RealtimeCandleEngine:
                  "stoch_signal":"neutral","stoch_k":None}
         return {"timeframes": {tf: empty for tf in ["base","5m","15m","1h"]},
                 "dominant": direction, "aligned_tfs": 0, "alignment_pct": 0}
+
+    # ──────────────────────────────────────────────────────────────
+    #  Multi-timeframe price projection (HH / LL targets per TF)
+    # ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_mtf_targets(df_base: pd.DataFrame) -> List[dict]:
+        """
+        Resample 5s base candles to 2m/5m/10m/15m/30m/1h/session-day
+        and compute swing-based higher-high / lower-low projections per TF.
+        Swing high/low = rolling 5-bar extremes; projection = swing ± 1.5×ATR.
+        """
+        TF_RULES = [
+            ("2m",  "2min"),
+            ("5m",  "5min"),
+            ("10m", "10min"),
+            ("15m", "15min"),
+            ("30m", "30min"),
+            ("1h",  "1h"),
+        ]
+
+        def _resample(df: pd.DataFrame, rule: str) -> Optional[pd.DataFrame]:
+            try:
+                agg = {k: v for k, v in {
+                    "Open": "first", "High": "max",
+                    "Low": "min", "Close": "last", "Volume": "sum",
+                }.items() if k in df.columns}
+                out = df.resample(rule).agg(agg).dropna()
+                return out if len(out) >= 3 else None
+            except Exception:
+                return None
+
+        def _tf_stats(df: pd.DataFrame) -> dict:
+            n      = len(df)
+            period = min(14, n - 1) if n > 2 else 1
+            close  = df["Close"]
+            high   = df["High"]
+            low    = df["Low"]
+
+            # Trend: EMA9 vs EMA21, confirmed by recent price momentum
+            ema9  = float(close.ewm(span=min(9,  n), adjust=False).mean().iloc[-1])
+            ema21 = float(close.ewm(span=min(21, n), adjust=False).mean().iloc[-1])
+            cur   = float(close.iloc[-1])
+            prev5 = float(close.iloc[max(-5, -n)])
+            if ema9 > ema21 and cur >= prev5:
+                trend = "bullish"
+            elif ema9 < ema21 and cur <= prev5:
+                trend = "bearish"
+            else:
+                trend = "neutral"
+
+            # ATR (smoothed True Range)
+            pc  = close.shift(1)
+            tr  = pd.concat([(high - low), (high - pc).abs(), (low - pc).abs()], axis=1).max(axis=1)
+            atr = float(tr.rolling(period).mean().iloc[-1])
+            if math.isnan(atr) or atr <= 0:
+                atr = float((high - low).mean())
+            atr = max(atr, cur * 0.001)   # floor at 0.1% of price
+
+            # Swing high / low over last 5 bars
+            look       = min(5, n)
+            swing_high = float(high.iloc[-look:].max())
+            swing_low  = float(low.iloc[-look:].min())
+
+            # RSI
+            delta = close.diff()
+            gain  = delta.clip(lower=0).rolling(period).mean()
+            loss  = (-delta.clip(upper=0)).rolling(period).mean()
+            rs    = gain / loss.replace(0, np.nan)
+            rsi   = float((100 - 100 / (1 + rs)).iloc[-1])
+            rsi   = rsi if not math.isnan(rsi) else 50.0
+
+            return {
+                "trend":      trend,
+                "atr":        round(atr, 4),
+                "swing_high": round(swing_high, 2),
+                "swing_low":  round(swing_low,  2),
+                "proj_hh":    round(swing_high + 1.5 * atr, 2),
+                "proj_ll":    round(swing_low  - 1.5 * atr, 2),
+                "rsi":        round(rsi, 1),
+                "price":      round(cur, 2),
+            }
+
+        results: List[dict] = []
+        ref_atr: float = 0.0   # store 5m ATR for day-projection fallback
+
+        for tf_label, rule in TF_RULES:
+            df_tf = _resample(df_base, rule)
+            if df_tf is None:
+                results.append({"tf": tf_label, "trend": "n/a",
+                                 "swing_high": None, "swing_low": None,
+                                 "proj_hh": None, "proj_ll": None,
+                                 "rsi": None, "atr": None, "price": None})
+                continue
+            try:
+                stats = _tf_stats(df_tf)
+                if tf_label == "5m" and stats["atr"]:
+                    ref_atr = stats["atr"]
+                results.append({"tf": tf_label, **stats})
+            except Exception:
+                results.append({"tf": tf_label, "trend": "n/a",
+                                 "swing_high": None, "swing_low": None,
+                                 "proj_hh": None, "proj_ll": None,
+                                 "rsi": None, "atr": None, "price": None})
+
+        # Session-day row: today's intraday high/low + ATR-based extension
+        try:
+            day_hi  = float(df_base["High"].max())
+            day_lo  = float(df_base["Low"].min())
+            cur_day = float(df_base["Close"].iloc[-1])
+            rng     = day_hi - day_lo
+            pos     = (cur_day - day_lo) / rng if rng > 0 else 0.5
+            day_trend = "bullish" if pos > 0.55 else ("bearish" if pos < 0.45 else "neutral")
+
+            # Daily extension: use 5m ATR × Fibonacci 1.618 ratio
+            ext = (ref_atr * 1.618) if ref_atr > 0 else rng * 0.5
+            results.append({
+                "tf":         "1d",
+                "trend":      day_trend,
+                "swing_high": round(day_hi, 2),
+                "swing_low":  round(day_lo,  2),
+                "proj_hh":    round(day_hi + ext, 2),
+                "proj_ll":    round(day_lo - ext, 2),
+                "rsi":        None,
+                "atr":        None,
+                "price":      round(cur_day, 2),
+            })
+        except Exception:
+            pass
+
+        return results
 
 
 async def start_candle_engine() -> None:
