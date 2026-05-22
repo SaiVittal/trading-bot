@@ -1,14 +1,12 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: trading_platform_postgres
     restart: always
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-trading_platform}
+      POSTGRES_DB:       ${POSTGRES_DB:-trading_platform}
     ports:
       - "5432:5432"
     volumes:
@@ -60,7 +58,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - TELEGRAM_ALERT_COOLDOWN=${TELEGRAM_ALERT_COOLDOWN}
+      - TELEGRAM_ALERT_COOLDOWN=${TELEGRAM_ALERT_COOLDOWN:-120}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - MIN_CONFIDENCE=${MIN_CONFIDENCE:-55}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
     depends_on:
       postgres:
         condition: service_healthy

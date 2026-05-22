@@ -1,9 +1,24 @@
 import logging
 from typing import Optional, Any, cast
+from urllib.parse import urlparse
 import redis.asyncio as aioredis
 from app.core.config import settings
 
 logger = logging.getLogger("app.core.redis")
+
+
+def _safe_redis_url(url: str) -> str:
+    """Return the Redis URL with the password redacted for safe logging."""
+    try:
+        parsed = urlparse(url)
+        if parsed.password:
+            return parsed._replace(
+                netloc=parsed.netloc.replace(f":{parsed.password}@", ":***@")
+            ).geturl()
+    except Exception:
+        pass
+    return url
+
 
 class AsyncRedisClient:
     def __init__(self) -> None:
@@ -11,10 +26,8 @@ class AsyncRedisClient:
         self.client: Optional[aioredis.Redis] = None
 
     def initialize(self) -> None:
-        """
-        Creates the asynchronous connection pool using the environment Redis URL.
-        """
-        logger.info(f"Connecting to Redis pool at: {settings.REDIS_URL}")
+        """Creates the async connection pool from the environment Redis URL."""
+        logger.info(f"Connecting to Redis at: {_safe_redis_url(settings.REDIS_URL)}")
         self.pool = aioredis.ConnectionPool.from_url(
             settings.REDIS_URL,
             decode_responses=True,

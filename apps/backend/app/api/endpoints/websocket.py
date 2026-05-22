@@ -1,97 +1,88 @@
 import asyncio
 import json
 import logging
+import re
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.core.redis_client import redis_client
 
 router = APIRouter()
 logger = logging.getLogger("app.api.websocket")
 
-# Subscribed channels
 CHANNELS = ["market:ticks", "market:candles", "signals:alerts"]
+
+# US equity ticker symbols: 1-5 uppercase letters (covers NYSE/NASDAQ/AMEX).
+# Allows dots and hyphens for instruments like BRK.B, BF-B.
+_SYMBOL_RE = re.compile(r'^[A-Z][A-Z0-9.\-]{0,9}$')
+
+
+def _is_valid_symbol(raw: str) -> bool:
+    return bool(raw) and bool(_SYMBOL_RE.match(raw))
+
 
 @router.websocket("")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket endpoint connecting clients to the real-time Redis event stream.
-    """
+    """WebSocket endpoint — bridges clients to the Redis event stream."""
     await websocket.accept()
     logger.info("New WebSocket connection accepted.")
 
     client = redis_client.client
     if not client:
-        logger.error("Redis client is not initialized. Closing WebSocket.")
+        logger.error("Redis client not initialized. Closing WebSocket.")
         await websocket.close()
         return
 
-    # Create a subscriber channel
     pubsub = client.pubsub()
     await pubsub.subscribe(*CHANNELS)
-    logger.debug(f"Subscribed WebSocket client to: {CHANNELS}")
+    logger.debug(f"WebSocket subscribed to: {CHANNELS}")
 
-    # Flag to monitor receiver status
     running = True
 
     async def client_receiver():
-        """
-        Listen for incoming client packets, searches, or disconnect frames.
-        """
         nonlocal running
         try:
             while running:
-                # Blocks waiting for client packets
                 data_str = await websocket.receive_text()
                 try:
                     payload = json.loads(data_str)
                     if payload.get("type") == "search":
-                        symbol = payload.get("symbol", "").upper().strip()
-                        if symbol:
-                            logger.info(f"Client requested dynamic subscription to: {symbol}")
-                            # Broadcast to our real-time feed control plane in Redis
-                            await client.publish(
-                                "market:control",
-                                json.dumps({"action": "add", "symbol": symbol})
+                        raw_symbol = payload.get("symbol", "").upper().strip()
+                        if not _is_valid_symbol(raw_symbol):
+                            logger.warning(
+                                f"Rejected invalid symbol from WebSocket client: {raw_symbol!r}"
                             )
-                except Exception as ex:
-                    logger.warning(f"Failed to process client WebSocket control packet: {str(ex)}")
+                            continue
+                        logger.info(f"Client subscribed to symbol: {raw_symbol}")
+                        await client.publish(
+                            "market:control",
+                            json.dumps({"action": "add", "symbol": raw_symbol}),
+                        )
+                except (json.JSONDecodeError, TypeError) as ex:
+                    logger.warning(f"Malformed WebSocket packet ignored: {ex}")
         except WebSocketDisconnect:
-            logger.info("WebSocket connection closed by client.")
+            logger.info("WebSocket disconnected by client.")
             running = False
         except Exception as e:
-            logger.error(f"WebSocket client receiver error: {str(e)}")
+            logger.error(f"WebSocket receiver error: {e}")
             running = False
 
-    # Spawn receiver task in background
     receiver_task = asyncio.create_task(client_receiver())
 
     try:
-        # Loop listening to Redis messages and forwarding them
         while running:
-            # Short timeout to avoid blocking forever on cancel
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
-            
             if message and message["type"] == "message":
-                channel = message["channel"]
                 msg_data = message["data"]
                 if isinstance(msg_data, (str, bytes)):
-                    data = json.loads(msg_data)
-                    
-                    # Construct combined payload
-                    payload = {
-                        "channel": channel,
-                        "data": data
-                    }
-                    
-                    # Forward to WebSocket client
-                    await websocket.send_json(payload)
-                
-            await asyncio.sleep(0.01)  # Yield CPU execution
-            
+                    await websocket.send_json({
+                        "channel": message["channel"],
+                        "data":    json.loads(msg_data),
+                    })
+            await asyncio.sleep(0.01)
     except Exception as e:
-        logger.error(f"Error in WebSocket broadcasting loop: {str(e)}")
+        logger.error(f"WebSocket broadcast loop error: {e}")
     finally:
         running = False
         receiver_task.cancel()
         await pubsub.unsubscribe(*CHANNELS)
         await pubsub.close()
-        logger.info("WebSocket subscriber clean up finalized.")
+        logger.info("WebSocket cleaned up.")

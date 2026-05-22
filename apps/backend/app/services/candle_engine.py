@@ -1,471 +1,493 @@
 import asyncio
 import json
 import logging
+import math
 import time
-from typing import Dict, List, Optional, cast
-import pandas as pd
+from collections import deque
+from typing import Dict, Optional
+
 import numpy as np
+import pandas as pd
 import httpx
-from openai import AsyncOpenAI
+
 from app.core.config import settings
 from app.core.redis_client import redis_client
+from app.services.bot_upgrade import (
+    AlertFormatter,
+    CandlePatternEngine,
+    IndicatorEngine,
+    InsightGenerator,
+    MultiTimeframeEngine,
+    PriceRangeEngine,
+    ProbabilityEngine,
+    RiskEngine,
+    VolumeEngine,
+    VolatilityEngine,
+)
 
 logger = logging.getLogger("app.services.candle_engine")
 
-# Configuration Constants
-REDIS_TICK_CHANNEL = "market:ticks"
+# Redis channels
+REDIS_TICK_CHANNEL   = "market:ticks"
 REDIS_CANDLE_CHANNEL = "market:candles"
-REDIS_ALERT_CHANNEL = "signals:alerts"
+REDIS_ALERT_CHANNEL  = "signals:alerts"
 
-# Load Slack & Telegram Webhook Settings from environment
-SLACK_WEBHOOK = getattr(settings, "SLACK_WEBHOOK_URL", "")
-TG_TOKEN = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
-TG_CHAT_ID = getattr(settings, "TELEGRAM_CHAT_ID", "")
-TG_COOLDOWN = getattr(settings, "TELEGRAM_ALERT_COOLDOWN", 120)
+# Candle accumulation window (seconds)
+CANDLE_WINDOW_SECS = 5
 
-# Standardized trading parameters mapping your yfinance bot configs
+# 2 hours of 5s candles — enough for meaningful 5m/15m resampling
+CANDLE_HISTORY_SIZE = 1440
+
+# Stochastic parameters
 STOCH_K_PERIOD = 5
 STOCH_D_PERIOD = 3
-STOCH_SMOOTH = 3
-STOCH_OB = 80
-STOCH_OS = 20
+STOCH_SMOOTH   = 3
+STOCH_OB       = 80
+STOCH_OS       = 20
 
+# RSI parameters
 RSI_PERIOD = 14
-RSI_OS = 35
-RSI_OB = 65
+RSI_OS     = 35
+RSI_OB     = 65
 
+# VWAP proximity gate (%)
 VWAP_TOLERANCE_PCT = 0.3
-VOLUME_MA_PERIOD = 20
-VOLUME_SPIKE_MULT = 1.5
 
-ATR_PERIOD = 14
-STOP_LOSS_ATR_MULT = 1.0
-TARGET1_ATR_MULT = 1.5
-TARGET2_ATR_MULT = 2.5
+# Volume spike multiplier (used for gate only; VolumeEngine handles richer stats)
+VOLUME_MA_PERIOD  = 20
+VOLUME_SPIKE_MULT = 1.5
 
 
 class RealtimeCandleEngine:
     def __init__(self) -> None:
-        # Multi-symbol in-memory state directories
-        self.active_candles: Dict[str, Dict] = {}
-        self.candle_start_times: Dict[str, float] = {}
-        self.closed_candles_history: Dict[str, List[Dict]] = {}
+        self.active_candles:        Dict[str, Dict]  = {}
+        self.candle_start_times:    Dict[str, float] = {}
+        # deque gives O(1) append/pop vs list's O(n) pop(0)
+        self.closed_candles_history: Dict[str, deque] = {}
         self.last_telegram_alert_time: Dict[str, float] = {}
-        
-        # Active OpenAI connection
-        self.openai_client = None
-        if settings.OPENAI_API_KEY and settings.OPENAI_API_KEY != "your_openai_api_key_here":
-            logger.info("OpenAI API Key detected! Activating GPT-4o Insights compiler.")
-            self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+        # Upgrade engines — all stateless, safe to share across ticks
+        self._indicator  = IndicatorEngine()
+        self._candles    = CandlePatternEngine()
+        self._range      = PriceRangeEngine()
+        self._mtf        = MultiTimeframeEngine()
+        self._volume     = VolumeEngine()
+        self._volatility = VolatilityEngine()
+        self._prob       = ProbabilityEngine()
+        self._risk       = RiskEngine()
+        self._insight    = InsightGenerator()
+        self._formatter  = AlertFormatter()
+
+        # Optional OpenAI for enhanced narrative (graceful no-op if absent)
+        self._openai = None
+        openai_key   = settings.OPENAI_API_KEY or ""
+        if openai_key and "your_openai_api_key" not in openai_key:
+            try:
+                from openai import AsyncOpenAI
+                self._openai = AsyncOpenAI(api_key=openai_key)
+                logger.info("OpenAI detected — enhanced AI insights active.")
+            except ImportError:
+                logger.warning("openai package missing; using InsightGenerator narrative.")
         else:
-            logger.warning("No OpenAI API Key configured. Utilizing quantitative expert rules for AI Insights.")
+            logger.info("No OpenAI key — using InsightGenerator for AI narratives.")
+
+    # ──────────────────────────────────────────────────────────────
+    #  Main loop
+    # ──────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """
-        Subscribes to Redis tick feed, aggregates candles per symbol, and evaluates strategy signals.
-        """
-        logger.info("Initializing Multi-Symbol Candle Engine with yfinance strategy parameters...")
-        
+        logger.info("Initializing Multi-Symbol Candle Engine...")
         client = redis_client.client
         if not client:
-            logger.error("Redis client is not initialized. Cannot run Candle Engine.")
+            logger.error("Redis client not initialized. Cannot run Candle Engine.")
             return
 
         async with client.pubsub() as pubsub:
             await pubsub.subscribe(REDIS_TICK_CHANNEL)
             logger.info(f"Subscribed to tick channel: {REDIS_TICK_CHANNEL}")
-
             try:
                 async for message in pubsub.listen():
                     if message["type"] != "message":
                         continue
-                    
-                    tick_data = json.loads(message["data"])
-                    await self.process_tick(tick_data)
-                    
+                    await self.process_tick(json.loads(message["data"]))
             except asyncio.CancelledError:
-                logger.info("Candle Engine task received cancel. Exiting...")
+                logger.info("Candle Engine cancelled — shutting down.")
             except Exception as e:
-                logger.error(f"Error in Candle Engine processing: {str(e)}")
+                logger.error(f"Candle Engine error: {e}", exc_info=True)
+
+    # ──────────────────────────────────────────────────────────────
+    #  Tick → Candle accumulation
+    # ──────────────────────────────────────────────────────────────
 
     async def process_tick(self, tick: Dict) -> None:
-        symbol = tick["symbol"]
-        price = tick["price"]
-        volume = tick["volume"]
-        timestamp = tick["timestamp"]
+        symbol    = tick["symbol"]
+        price     = float(tick["price"])
+        volume    = int(tick["volume"])
+        timestamp = float(tick["timestamp"])
 
-        # 1. Initialize active candle for new symbols
         if symbol not in self.active_candles:
             self.candle_start_times[symbol] = timestamp
             self.active_candles[symbol] = {
-                "symbol": symbol,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": volume,
-                "timestamp": timestamp
+                "symbol": symbol, "open": price, "high": price,
+                "low": price, "close": price, "volume": volume,
+                "timestamp": timestamp,
             }
             return
 
-        active_candle = self.active_candles[symbol]
-        start_time = self.candle_start_times[symbol]
+        active    = self.active_candles[symbol]
+        start     = self.candle_start_times[symbol]
 
-        # 2. Accumulate ticks in 5s active window per symbol
-        if timestamp - start_time < 5.0:
-            active_candle["high"] = max(active_candle["high"], price)
-            active_candle["low"] = min(active_candle["low"], price)
-            active_candle["close"] = price
-            active_candle["volume"] = active_candle["volume"] + volume
+        if timestamp - start < CANDLE_WINDOW_SECS:
+            active["high"]   = max(active["high"], price)
+            active["low"]    = min(active["low"],  price)
+            active["close"]  = price
+            active["volume"] += volume
         else:
-            # 3. Candle completed! Close and record
-            closed_candle = active_candle
-            await self.publish_candle(closed_candle)
+            await self.publish_candle(active)
 
             if symbol not in self.closed_candles_history:
-                self.closed_candles_history[symbol] = []
-            
-            history = self.closed_candles_history[symbol]
-            history.append(closed_candle)
-            
-            if len(history) > 120:  # Maintain sufficient lookback for indicators
-                history.pop(0)
+                self.closed_candles_history[symbol] = deque(maxlen=CANDLE_HISTORY_SIZE)
+            self.closed_candles_history[symbol].append(active)
 
-            # Evaluate strategy rules for this specific symbol
-            await self.evaluate_strategy_checklist(closed_candle)
+            await self.evaluate_strategy_checklist(symbol)
 
-            # 4. Incept next candle
             self.candle_start_times[symbol] = timestamp
             self.active_candles[symbol] = {
-                "symbol": symbol,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": volume,
-                "timestamp": timestamp
+                "symbol": symbol, "open": price, "high": price,
+                "low": price, "close": price, "volume": volume,
+                "timestamp": timestamp,
             }
 
     async def publish_candle(self, candle: Dict) -> None:
         if redis_client.client:
-            await redis_client.client.publish(
-                REDIS_CANDLE_CHANNEL,
-                json.dumps(candle)
-            )
+            await redis_client.client.publish(REDIS_CANDLE_CHANNEL, json.dumps(candle))
 
-    # --------------------------------------------------------------------------
-    # Core Indicator Calculations (Matches Pandas Bot equations exactly)
-    # --------------------------------------------------------------------------
-    def calculate_indicators_dataframe(self, symbol: str) -> Optional[pd.DataFrame]:
-        """
-        Converts in-memory candle arrays of a specific symbol to a Pandas DataFrame
-        and calculates Stochastic, RSI, ATR, VWAP, and Volume MA.
-        """
-        history = self.closed_candles_history.get(symbol, [])
-        if len(history) < 25:
+    # ──────────────────────────────────────────────────────────────
+    #  DataFrame builder
+    # ──────────────────────────────────────────────────────────────
+
+    def _build_dataframe(self, symbol: str) -> Optional[pd.DataFrame]:
+        history = self.closed_candles_history.get(symbol)
+        if not history or len(history) < 25:
             return None
 
-        # Build raw DataFrame
-        df = pd.DataFrame(history)
+        df = pd.DataFrame(list(history))
         df.rename(columns={
-            "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"
+            "open": "Open", "high": "High", "low": "Low",
+            "close": "Close", "volume": "Volume",
         }, inplace=True)
-        timestamps = pd.to_datetime(df["timestamp"], unit="s")
-        df["Date"] = pd.Series(timestamps).dt.date
-        df.set_index(timestamps, inplace=True)
-
-        # 1. Stochastic Calculation
-        low_min = df["Low"].rolling(STOCH_K_PERIOD).min()
-        high_max = df["High"].rolling(STOCH_K_PERIOD).max()
-        raw_k = 100 * (df["Close"] - low_min) / (high_max - low_min + 1e-10)
-        df["%K"] = raw_k.rolling(STOCH_SMOOTH).mean()
-        df["%D"] = df["%K"].rolling(STOCH_D_PERIOD).mean()
-
-        # 2. Wilder RSI
-        delta = df["Close"].diff()
-        gain = delta.clip(lower=0)
-        loss = (-delta).clip(lower=0)
-        avg_gain = gain.ewm(alpha=1/RSI_PERIOD, min_periods=RSI_PERIOD, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1/RSI_PERIOD, min_periods=RSI_PERIOD, adjust=False).mean()
-        rs = avg_gain / (avg_loss + 1e-10)
-        df["RSI"] = 100 - (100 / (1 + rs))
-
-        # 3. Session VWAP (Resets each session / day)
-        df["TP"] = (df["High"] + df["Low"] + df["Close"]) / 3
-        df["TPV"] = df["TP"] * df["Volume"]
-        df["CumTPV"] = df.groupby("Date")["TPV"].cumsum()
-        df["CumVol"] = df.groupby("Date")["Volume"].cumsum()
-        df["VWAP"] = df["CumTPV"] / (df["CumVol"] + 1e-10)
-
-        # 4. Average True Range (ATR)
-        h_l = df["High"] - df["Low"]
-        h_pc = (df["High"] - df["Close"].shift()).abs()
-        l_pc = (df["Low"] - df["Close"].shift()).abs()
-        tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
-        df["ATR"] = tr.rolling(ATR_PERIOD).mean()
-
-        # 5. Volume MA
-        df["VolMA"] = df["Volume"].rolling(VOLUME_MA_PERIOD).mean()
-
+        idx = pd.to_datetime(df["timestamp"], unit="s", utc=True)
+        df.set_index(idx, inplace=True)
+        df.drop(columns=["symbol", "timestamp"], errors="ignore", inplace=True)
         return df
 
-    # --------------------------------------------------------------------------
-    # OpenAI & External Webhooks Core
-    # --------------------------------------------------------------------------
-    async def get_openai_trading_insight(self, symbol: str, action: str, price: float, rsi: float, vwap: float, stc: str) -> str:
-        """
-        Queries OpenAI Chat Completion API to generate professional insights.
-        """
-        if not self.openai_client:
-            # High-quality fallback analysis engine
-            if action == "BUY":
-                return f"Stochastic oscillator triggers oversold bounce for {symbol} at ${price:.2f}. RSI of {rsi:.1f} shows solid dynamic support near VWAP floor bounds."
-            else:
-                return f"Stochastic trend crossover below 80 combined with an overbought RSI of {rsi:.1f} signals selling distribution for {symbol} near VWAP ceiling."
+    # ──────────────────────────────────────────────────────────────
+    #  Signal evaluation + upgrade pipeline
+    # ──────────────────────────────────────────────────────────────
 
-        prompt = (
-            f"As an institutional quantitative analyst, write a single-sentence active trading insight:\n"
-            f"Asset: {symbol}\n"
-            f"Action: {action} Triggered\n"
-            f"Price: ${price:.2f}\n"
-            f"Stochastic Crossover: {stc}\n"
-            f"RSI-14: {rsi:.1f}\n"
-            f"VWAP Level: ${vwap:.2f}\n\n"
-            f"Explain why this stochastic crossover represents a high-probability trade entry. Keep it under 25 words."
-        )
-        try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are a professional quant trader writing slack signal insights."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=55,
-                temperature=0.65
-            )
-            content = response.choices[0].message.content
-            return content.strip() if content else f"Technical crossover for {symbol} at ${price:.2f} confirms momentum strategy parameters are aligned."
-        except Exception as e:
-            logger.warning(f"Failed to query OpenAI chat completion: {str(e)}")
-            return f"Technical crossover for {symbol} at ${price:.2f} confirms momentum strategy parameters are aligned."
-
-    async def dispatch_slack_alert(self, sig: Dict) -> None:
-        """
-        Sends formatted Slack block kit cards to your Slack channels.
-        """
-        return  # Disabled per user request (focusing strictly on Telegram)
-            
-        is_buy = sig["action"] == "BUY"
-        emoji = "🟢" if is_buy else "🔴"
-        color = "#10b981" if is_buy else "#ef4444"
-
-        # Format blocks
-        payload = {
-            "text": f"{emoji} {sig['symbol']} {sig['action']} Alert @ ${sig['price']:.2f}",
-            "attachments": [
-                {
-                    "color": color,
-                    "blocks": [
-                        {
-                            "type": "header",
-                            "text": {
-                                "type": "plain_text",
-                                "text": f"{emoji} {sig['symbol']} — {sig['action']} ALERT",
-                            }
-                        },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"*Slack Notification Code Output:*\n`{sig['message']}`"
-                            }
-                        },
-                        {
-                            "type": "section",
-                            "fields": [
-                                {"type": "mrkdwn", "text": f"*Trigger Price*\n${sig['price']:.2f}"},
-                                {"type": "mrkdwn", "text": f"*VWAP Line*\n${sig['vwap']:.2f}"},
-                                {"type": "mrkdwn", "text": f"*Stochastic STC*\n{sig['stc']}"},
-                                {"type": "mrkdwn", "text": f"*RSI (14)*\n{sig['rsi']:.1f}"},
-                                {"type": "mrkdwn", "text": f"*Stop Loss*\n${sig['stop']:.2f}"},
-                                {"type": "mrkdwn", "text": f"*Target 1*\n${sig['t1']:.2f}"}
-                            ]
-                        },
-                        {
-                            "type": "context",
-                            "elements": [
-                                {
-                                    "type": "mrkdwn",
-                                    "text": f"🧠 *AI Insight:* {sig['ai_insight']}"
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.post(SLACK_WEBHOOK, json=payload, timeout=5.0)
-                logger.info(f"Successfully posted Signal Alert Card for {sig['symbol']} to Slack!")
-        except Exception as e:
-            logger.error(f"Error posting to Slack Webhook: {str(e)}")
-
-    async def dispatch_telegram_alert(self, sig: Dict) -> None:
-        """
-        Sends clear signal alerts to your Telegram chat channels.
-        """
-        if not TG_TOKEN or not TG_CHAT_ID or "your_telegram_bot_token" in TG_TOKEN:
-            return
-            
-        symbol = sig["symbol"]
-        current_time = time.time()
-        last_sent = self.last_telegram_alert_time.get(symbol, 0.0)
-        
-        # Enforce configurable Telegram alert cooldown (default: 120s)
-        if current_time - last_sent < TG_COOLDOWN:
-            logger.info(
-                f"Telegram alert for {symbol} suppressed: Cooldown active "
-                f"({current_time - last_sent:.1f}s elapsed < {TG_COOLDOWN}s required)"
-            )
+    async def evaluate_strategy_checklist(self, symbol: str) -> None:
+        df_raw = self._build_dataframe(symbol)
+        if df_raw is None or len(df_raw) < 5:
             return
 
-        emoji = "🟢" if sig["action"] == "BUY" else "🔴"
-        text = (
-            f"{emoji} *{sig['symbol']} {sig['action']} ALERT*\n"
-            f"Price: ${sig['price']:.2f} | VWAP: ${sig['vwap']:.2f}\n"
-            f"STC Crossover: {sig['stc']}\n"
-            f"RSI-14: {sig['rsi']:.1f}\n"
-            f"Entry Price: ${sig['price']:.2f} | Stop: ${sig['stop']:.2f}\n"
-            f"T1: ${sig['t1']:.2f} | T2: ${sig['t2']:.2f}\n\n"
-            f"🧠 *AI Insight:* _{sig['ai_insight']}_"
-        )
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        # Run indicators (STC_K/D, RSI, VWAP, ATR, EMA9/21)
         try:
-            async with httpx.AsyncClient() as client:
-                await client.post(url, json={
-                    "chat_id": TG_CHAT_ID,
-                    "text": text,
-                    "parse_mode": "Markdown"
-                }, timeout=5.0)
-                # Only update last sent time upon successful transmission
-                self.last_telegram_alert_time[symbol] = current_time
-                logger.info(f"Successfully dispatched Signal Alert for {sig['symbol']} to Telegram channel!")
+            df = self._indicator.run(df_raw)
         except Exception as e:
-            logger.error(f"Error posting Telegram alert: {str(e)}")
-
-    # --------------------------------------------------------------------------
-    # Your Exact Signal Crossover Scan Loop (Multi-Symbol Adaptive)
-    # --------------------------------------------------------------------------
-    async def evaluate_strategy_checklist(self, candle: Dict) -> None:
-        symbol = candle["symbol"]
-        df = self.calculate_indicators_dataframe(symbol)
-        if df is None or len(df) < 5:
+            logger.warning(f"IndicatorEngine failed for {symbol}: {e}")
             return
 
-        # Fetch current and previous indicator rows
-        cur = df.iloc[-1]
+        cur  = df.iloc[-1]
         prev = df.iloc[-2]
 
-        price = float(cur["Close"])
-        vwap = float(cur["VWAP"])
-        k = float(cur["%K"])
-        d = float(cur["%D"])
-        k_prev = float(prev["%K"])
-        d_prev = float(prev["%D"])
-        rsi = float(cur["RSI"])
-        atr = float(cur["ATR"])
-        vol = float(cur["Volume"])
-        vol_ma = float(cur["VolMA"])
+        # Extract and validate indicator values
+        price   = float(cur["Close"])
+        vwap    = float(cur.get("VWAP") or price)
+        k       = cur.get("STC_K")
+        d       = cur.get("STC_D")
+        pk      = prev.get("STC_K")
+        pd_     = prev.get("STC_D")
+        rsi     = cur.get("RSI")
+        atr     = cur.get("ATR")
+        vol_ma  = df["Volume"].rolling(VOLUME_MA_PERIOD).mean().iloc[-1]
 
-        if np.isnan(k) or np.isnan(d) or np.isnan(rsi) or np.isnan(atr) or np.isnan(vol_ma):
-            # Indicators not fully populated in warmup period
+        required = [k, d, pk, pd_, rsi, atr, vol_ma]
+        if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in required):
             return
 
-        vwap_pct_diff = abs(price - vwap) / vwap * 100
+        k, d, pk, pd_ = float(k), float(d), float(pk), float(pd_)
+        rsi, atr, vol_ma = float(rsi), float(atr), float(vol_ma)
+        vol = float(cur["Volume"])
 
-        # ── BUY CHECKLIST (Your exact bot conditions) ─────────────────────
-        stoch_cross_up = (k_prev < d_prev) and (k > d)
-        stoch_oversold = k_prev < STOCH_OS
-        rsi_oversold = rsi < RSI_OS
-        near_vwap_buy = vwap_pct_diff < VWAP_TOLERANCE_PCT or price < vwap
-        vol_spike = vol > vol_ma * VOLUME_SPIKE_MULT
+        vwap_pct_diff = abs(price - vwap) / vwap * 100 if vwap > 0 else 0
 
-        buy_score = sum([stoch_cross_up, stoch_oversold, rsi_oversold, near_vwap_buy, vol_spike])
+        # ── PRIMARY SIGNAL GATE (stochastic crossover + RSI + VWAP) ──────────
+        stoch_cross_up  = pk < pd_ and k > d
+        stoch_cross_dn  = pk > pd_ and k < d
+        stoch_oversold  = pk < STOCH_OS
+        stoch_overbought = pk > STOCH_OB
+        rsi_oversold    = rsi < RSI_OS
+        rsi_overbought  = rsi > RSI_OB
+        near_vwap       = vwap_pct_diff < VWAP_TOLERANCE_PCT
+        vol_spike_gate  = vol > vol_ma * VOLUME_SPIKE_MULT
 
-        # ── SELL CHECKLIST (Your exact bot conditions) ────────────────────
-        stoch_cross_dn = (k_prev > d_prev) and (k < d)
-        stoch_overbought = k_prev > STOCH_OB
-        rsi_overbought = rsi > RSI_OB
-        near_vwap_sell = vwap_pct_diff < VWAP_TOLERANCE_PCT or price > vwap
-
-        sell_score = sum([stoch_cross_dn, stoch_overbought, rsi_overbought, near_vwap_sell, vol_spike])
-
-        action = None
-        stc_cross = ""
-        stop = 0.0
-        t1 = 0.0
-        t2 = 0.0
-        vwap_state = ""
+        buy_score  = sum([stoch_cross_up, stoch_oversold, rsi_oversold,
+                          near_vwap or price < vwap, vol_spike_gate])
+        sell_score = sum([stoch_cross_dn, stoch_overbought, rsi_overbought,
+                          near_vwap or price > vwap, vol_spike_gate])
 
         if stoch_cross_up and stoch_oversold and buy_score >= 3:
             action = "BUY"
-            stc_cross = "18 crossed above 22"  # Formatted Stochastic cross tag
-            stop = round(price - atr * STOP_LOSS_ATR_MULT, 2)
-            t1 = round(price + atr * TARGET1_ATR_MULT, 2)
-            t2 = round(price + atr * TARGET2_ATR_MULT, 2)
-            vwap_state = "At VWAP" if vwap_pct_diff < VWAP_TOLERANCE_PCT else "Below VWAP"
-
         elif stoch_cross_dn and stoch_overbought and sell_score >= 3:
             action = "SELL"
-            stc_cross = "22 crossed below 18"
-            stop = round(price + atr * STOP_LOSS_ATR_MULT, 2)
-            t1 = round(price - atr * TARGET1_ATR_MULT, 2)
-            t2 = round(price - atr * TARGET2_ATR_MULT, 2)
-            vwap_state = "At VWAP" if vwap_pct_diff < VWAP_TOLERANCE_PCT else "Above VWAP"
+        else:
+            return
 
-        if action:
-            # 1. Fetch OpenAI Quantitative Insight block
-            ai_insight = await self.get_openai_trading_insight(symbol, action, price, rsi, vwap, stc_cross)
+        direction  = "bullish" if action == "BUY" else "bearish"
+        stc_cross  = (f"{k:.1f} crossed above {d:.1f}" if action == "BUY"
+                      else f"{k:.1f} crossed below {d:.1f}")
+        vwap_state = "At VWAP" if near_vwap else ("Below VWAP" if price < vwap else "Above VWAP")
 
-            # 2. FORMAT EXACTLY TO YOUR SPECIFICATION SLACK BOT ALERT:
-            # "NVDA BUY ALERT | Price: $220.42 | STC: 18 crossed above 22 | RSI: 33 | At VWAP | Stop: $218.20 | T1: $224.50 | T2: $228.00"
-            slack_alert = (
-                f"{symbol} {action} ALERT | Price: ${price:.2f} | "
-                f"STC: {stc_cross} | RSI: {int(rsi)} | {vwap_state} | "
-                f"Stop: ${stop:.2f} | T1: ${t1:.2f} | T2: ${t2:.2f}"
-            )
-            
-            alert_payload = {
-                "symbol": symbol,
-                "action": action,
-                "price": price,
-                "rsi": int(rsi),
-                "vwap": vwap,
-                "stc": stc_cross,
-                "stop": stop,
-                "t1": t1,
-                "t2": t2,
-                "message": slack_alert,
-                "ai_insight": ai_insight,
-                "timestamp": time.time()
-            }
+        # ── UPGRADE PIPELINE ─────────────────────────────────────────────────
+        try:
+            candle_data  = self._candles.run(df)
+            mtf_data     = self._mtf.run(df_raw)
+            range_data   = self._range.run(df, direction, candle_data)
+            vol_data     = self._volatility.run(df)
+            volume_data  = self._volume.run(df)
+            prob_data    = self._prob.run(mtf_data, df, vol_data, volume_data, candle_data)
 
-            logger.info(f"Checklist Trigger! Dispatched alert for {symbol}: {slack_alert}")
-            
-            # Publish to local WebSockets
-            if redis_client.client:
-                await redis_client.client.publish(
-                    REDIS_ALERT_CHANNEL,
-                    json.dumps(alert_payload)
+            if prob_data["confidence"] < settings.MIN_CONFIDENCE:
+                logger.info(
+                    f"{symbol} {action} gate passed but confidence "
+                    f"{prob_data['confidence']}/100 < threshold {settings.MIN_CONFIDENCE}. Suppressed."
                 )
+                return
 
-            # Dispatch webhooks asynchronously
-            asyncio.create_task(self.dispatch_slack_alert(alert_payload))
-            asyncio.create_task(self.dispatch_telegram_alert(alert_payload))
+            risk_data   = self._risk.run(price, direction, vol_data["atr"], range_data)
+            base_insight = self._insight.generate(
+                symbol, prob_data, mtf_data, vol_data, volume_data, candle_data, range_data
+            )
+            insight_txt = await self._enhance_insight(
+                symbol, action, price, rsi, vwap, stc_cross, base_insight
+            )
+
+        except Exception as e:
+            logger.error(f"Upgrade pipeline failed for {symbol}: {e}", exc_info=True)
+            # Graceful fallback — fire a basic alert so the signal isn't lost entirely
+            risk_data    = self._basic_risk(price, action, atr)
+            prob_data    = self._empty_prob(direction)
+            mtf_data     = self._empty_mtf(direction)
+            vol_data     = {"regime": "normal", "atr": round(atr, 4), "atr_avg": round(atr, 4),
+                            "expanding": False, "vwap_dist_pct": round(vwap_pct_diff, 2),
+                            "rolling_vol": 0}
+            volume_data  = {"rel_vol": round(vol / vol_ma, 2), "spike": vol_spike_gate,
+                            "exhaustion": False, "confirmation": False,
+                            "vol_trend": "normal", "avg_volume": int(vol_ma)}
+            candle_data  = {"patterns": [], "bias": "neutral",
+                            "pattern_target": None, "candle_expansion": 1.0}
+            range_data   = {"expected_low": round(price - atr * 2.5, 2),
+                            "expected_high": round(price + atr * 2.5, 2),
+                            "support": [], "resistance": [], "atr": round(atr, 4),
+                            "sr_target": None}
+            insight_txt  = await self._enhance_insight(
+                symbol, action, price, rsi, vwap, stc_cross, ""
+            ) or f"Stochastic crossover for {symbol} at ${price:.2f}. RSI: {rsi:.1f}."
+
+        # ── FORMAT & DISPATCH ────────────────────────────────────────────────
+        console_msg   = self._formatter.format_console(
+            symbol, prob_data, mtf_data, vol_data, volume_data,
+            candle_data, range_data, risk_data, insight_txt
+        )
+        slack_payload = self._formatter.format_slack(
+            symbol, prob_data, mtf_data, vol_data, volume_data,
+            candle_data, range_data, risk_data, insight_txt
+        )
+
+        legacy_str = (
+            f"{symbol} {action} ALERT | Price: ${price:.2f} | "
+            f"STC: {stc_cross} | RSI: {int(rsi)} | {vwap_state} | "
+            f"Stop: ${risk_data['stop']:.2f} | T1: ${risk_data['t1']:.2f} | "
+            f"T2: ${risk_data['t2']:.2f} | Confidence: {prob_data['confidence']}/100"
+        )
+
+        alert_payload = {
+            "symbol":           symbol,
+            "action":           action,
+            "price":            price,
+            "rsi":              int(rsi),
+            "vwap":             round(vwap, 2),
+            "stc":              stc_cross,
+            "stop":             risk_data["stop"],
+            "t1":               risk_data["t1"],
+            "t2":               risk_data["t2"],
+            "rr":               risk_data["rr"],
+            "confidence":       prob_data["confidence"],
+            "confidence_label": prob_data["confidence_label"],
+            "patterns":         candle_data["patterns"],
+            "expected_range":   [range_data["expected_low"], range_data["expected_high"]],
+            "vol_regime":       vol_data["regime"],
+            "vol_rel":          volume_data["rel_vol"],
+            "mtf_alignment":    prob_data.get("scores", {}).get("trend", 0),
+            "message":          legacy_str,
+            "ai_insight":       insight_txt,
+            "timestamp":        time.time(),
+        }
+
+        logger.info(f"Signal fired — {legacy_str}")
+        logger.debug(console_msg)
+
+        if redis_client.client:
+            await redis_client.client.publish(
+                REDIS_ALERT_CHANNEL, json.dumps(alert_payload)
+            )
+
+        # Fire-and-forget dispatch with error logging
+        def _on_task_done(task: asyncio.Task, label: str) -> None:
+            exc = task.exception() if not task.cancelled() else None
+            if exc:
+                logger.error(f"{label} dispatch task failed: {exc}")
+
+        slack_task = asyncio.create_task(
+            self._dispatch_slack(slack_payload)
+        )
+        slack_task.add_done_callback(lambda t: _on_task_done(t, "Slack"))
+
+        tg_task = asyncio.create_task(
+            self._dispatch_telegram(alert_payload)
+        )
+        tg_task.add_done_callback(lambda t: _on_task_done(t, "Telegram"))
+
+    # ──────────────────────────────────────────────────────────────
+    #  OpenAI enhancement (optional, no-ops gracefully)
+    # ──────────────────────────────────────────────────────────────
+
+    async def _enhance_insight(self, symbol: str, action: str, price: float,
+                                rsi: float, vwap: float, stc: str, base: str) -> str:
+        if not self._openai:
+            return base
+
+        prompt = (
+            f"Institutional quant insight — one sentence, max 30 words:\n"
+            f"{symbol} {action} at ${price:.2f} | STC: {stc} | RSI: {rsi:.1f} | VWAP: ${vwap:.2f}\n"
+            f"Base: {base}"
+        )
+        try:
+            resp    = await self._openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "Professional quant trader writing concise signal insights."},
+                    {"role": "user",   "content": prompt},
+                ],
+                max_tokens=60,
+                temperature=0.65,
+            )
+            content = resp.choices[0].message.content
+            return content.strip() if content else base
+        except Exception as e:
+            logger.warning(f"OpenAI insight failed for {symbol}: {e}")
+            return base
+
+    # ──────────────────────────────────────────────────────────────
+    #  Slack dispatch (Block Kit)
+    # ──────────────────────────────────────────────────────────────
+
+    async def _dispatch_slack(self, payload: dict) -> None:
+        webhook = settings.SLACK_WEBHOOK_URL or ""
+        if not webhook:
+            return
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(webhook, json=payload, timeout=5.0)
+                if resp.status_code == 200:
+                    logger.info("Slack alert dispatched.")
+                else:
+                    logger.warning(f"Slack returned HTTP {resp.status_code}.")
+        except Exception as e:
+            logger.error(f"Slack dispatch error: {e}")
+
+    # ──────────────────────────────────────────────────────────────
+    #  Telegram dispatch
+    # ──────────────────────────────────────────────────────────────
+
+    async def _dispatch_telegram(self, sig: Dict) -> None:
+        token   = settings.TELEGRAM_BOT_TOKEN or ""
+        chat_id = settings.TELEGRAM_CHAT_ID   or ""
+        if not token or not chat_id or "your_telegram_bot_token" in token:
+            return
+
+        symbol = sig["symbol"]
+        now    = time.time()
+        last   = self.last_telegram_alert_time.get(symbol, 0.0)
+        cooldown = settings.TELEGRAM_ALERT_COOLDOWN
+
+        if now - last < cooldown:
+            logger.info(
+                f"Telegram cooldown active for {symbol} "
+                f"({now - last:.1f}s elapsed / {cooldown}s required)."
+            )
+            return
+
+        emoji    = "🟢" if sig["action"] == "BUY" else "🔴"
+        patterns = (", ".join(p.replace("_", " ") for p in sig.get("patterns", []))
+                    or "None")
+        exp      = sig.get("expected_range", [])
+        rng_str  = f"${exp[0]} → ${exp[1]}" if len(exp) == 2 else "N/A"
+
+        text = (
+            f"{emoji} *{symbol} {sig['action']} ALERT*\n"
+            f"Price: ${sig['price']:.2f} | VWAP: ${sig['vwap']:.2f}\n"
+            f"STC: {sig['stc']} | RSI-14: {sig['rsi']}\n"
+            f"Entry: ${sig['price']:.2f} | Stop: ${sig['stop']:.2f}\n"
+            f"T1: ${sig['t1']:.2f} | T2: ${sig['t2']:.2f} | R:R 1:{sig['rr']}\n"
+            f"Expected Range: {rng_str}\n"
+            f"Confidence: {sig['confidence']}/100 ({sig['confidence_label']})\n"
+            f"Patterns: {patterns}\n"
+            f"Volatility: {sig['vol_regime'].upper()}\n\n"
+            f"🧠 *AI Insight:* _{sig['ai_insight']}_"
+        )
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    url,
+                    json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+                    timeout=5.0,
+                )
+            self.last_telegram_alert_time[symbol] = now
+            logger.info(f"Telegram alert dispatched for {symbol}.")
+        except Exception as e:
+            logger.error(f"Telegram dispatch error for {symbol}: {e}")
+
+    # ──────────────────────────────────────────────────────────────
+    #  Fallback helpers (used when upgrade pipeline errors)
+    # ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _basic_risk(price: float, action: str, atr: float) -> dict:
+        mult = 1.0 if action == "BUY" else -1.0
+        stop = round(price - mult * atr, 2)
+        t1   = round(price + mult * atr * 1.5, 2)
+        t2   = round(price + mult * atr * 2.5, 2)
+        risk = abs(price - stop)
+        return {"entry": round(price, 2), "stop": stop, "t1": t1, "t2": t2,
+                "rr": round(abs(price - t1) / risk, 2) if risk > 0 else 0,
+                "risk_$": round(risk, 2)}
+
+    @staticmethod
+    def _empty_prob(direction: str) -> dict:
+        return {"direction": direction, "confidence": 0, "confidence_label": "N/A",
+                "continuation_probability": 0, "reversal_probability": 0, "scores": {
+                    "trend": 0, "momentum": 0, "volume": 0, "volatility": 0, "pattern": 0}}
+
+    @staticmethod
+    def _empty_mtf(direction: str) -> dict:
+        empty_tf = {"trend": "unknown", "rsi": None, "above_vwap": None,
+                    "stoch_signal": "neutral", "stoch_k": None}
+        return {"timeframes": {tf: empty_tf for tf in ["base", "5m", "15m", "1h"]},
+                "dominant": direction, "aligned_tfs": 0, "alignment_pct": 0}
 
 
-# Start lifecycle loop
-async def start_candle_engine():
+async def start_candle_engine() -> None:
     engine = RealtimeCandleEngine()
     await engine.run()
