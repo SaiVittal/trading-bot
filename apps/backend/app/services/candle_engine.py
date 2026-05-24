@@ -28,6 +28,7 @@ from app.services.bot_upgrade import (
 )
 from app.services.strategy_engine import StrategyScanner, StrategySignal
 from app.services.opening_drive import OpeningDriveModule, OpeningDriveSignal
+from app.services.sr_strategies import SRStrategyModule, SRSignal as SRStrategySignal
 from app.services.price_fix import is_price_sane, validate_dataframe
 
 logger = logging.getLogger("app.services.candle_engine")
@@ -86,7 +87,12 @@ STRATEGY_MIN_CONF: Dict[str, int] = {
     "S18": 65,   # EMA-9 Breakout Long: 4 required conditions (slope UP + VWAP mandatory)
 }
 
-CATEGORY_EMOJI = {"VWAP": "💧", "REVERSAL": "🔄", "TREND": "📈", "SQUEEZE": "💥", "EMA": "📉", "OPENING_DRIVE": "🚀"}
+CATEGORY_EMOJI = {
+    "VWAP": "💧", "REVERSAL": "🔄", "TREND": "📈", "SQUEEZE": "💥",
+    "EMA": "📉", "OPENING_DRIVE": "🚀",
+    "SR_BOUNCE": "🎯", "SR_BREAKOUT": "⚡", "PIVOT": "🔵",
+    "ROUND_NUMBER": "🔢", "PDH_PDL": "📌",
+}
 
 # Opening Drive: only 9:30–10:30 ET (first hour only)
 OPENING_DRIVE_WINDOW = (dtime(9, 30), dtime(10, 30))
@@ -114,8 +120,10 @@ class RealtimeCandleEngine:
         self._insight    = InsightGenerator()
         self._formatter  = AlertFormatter()
         self._od_module      = OpeningDriveModule(min_confidence=55, min_rvol=3.0, min_gap_pct=3.0)
+        self._sr_module      = SRStrategyModule(min_confidence=55)
         self.prior_closes:   Dict[str, float] = {}   # symbol → prior session close
         self.session_dates:  Dict[str, object] = {}  # symbol → last seen date
+        self.prior_day_data: Dict[str, dict] = {}    # symbol → {high, low, close} of prior session
 
         # Optional OpenAI
         self._openai = None
@@ -194,6 +202,18 @@ class RealtimeCandleEngine:
             if symbol in self.session_dates and self.session_dates[symbol] != bar_date:
                 # New trading day — store yesterday's last close
                 self.prior_closes[symbol] = float(active["close"])
+                # Build prior day summary for S/R pivot calculations
+                history = self.closed_candles_history.get(symbol)
+                if history:
+                    prev_date = self.session_dates[symbol]
+                    prev_bars = [c for c in history
+                                 if _date.fromtimestamp(c["timestamp"]) == prev_date]
+                    if prev_bars:
+                        self.prior_day_data[symbol] = {
+                            "High":  max(c["high"]  for c in prev_bars),
+                            "Low":   min(c["low"]   for c in prev_bars),
+                            "Close": prev_bars[-1]["close"],
+                        }
             self.session_dates[symbol] = bar_date
 
             await self.evaluate_strategy_checklist(symbol)
@@ -319,6 +339,21 @@ class RealtimeCandleEngine:
                 except Exception as e:
                     logger.warning(f"Opening Drive scan failed for {symbol}: {e}")
 
+            # ── S/R strategies scan (S20–S27) ────────────────────────
+            sr_signals: List[SRStrategySignal] = []
+            try:
+                # Build prior-day DataFrame for PDH/PDL and pivot levels
+                pdd = self.prior_day_data.get(symbol)
+                df_prior = pd.DataFrame([pdd]) if pdd else None
+                sr_signals = self._sr_module.scan(symbol, df_raw, df_prior)
+                if sr_signals:
+                    logger.info(
+                        f"{symbol}: {len(sr_signals)} S/R signal(s) fired — "
+                        f"{[s.strategy_id for s in sr_signals]}"
+                    )
+            except Exception as e:
+                logger.warning(f"S/R scan failed for {symbol}: {e}")
+
             # Use upgrade engine confidence as secondary filter if configured
             if prob_data["confidence"] < settings.MIN_CONFIDENCE and len(signals) < 2:
                 logger.info(
@@ -353,6 +388,7 @@ class RealtimeCandleEngine:
             insight_txt = f"Strategy cluster for {symbol} — {len(signals)} signal(s) fired."
             mtf_targets  = self._compute_mtf_targets(df_raw)
             od_signals: List[OpeningDriveSignal] = []
+            sr_signals: List[SRStrategySignal] = []
 
         # ── Build alert payloads ──────────────────────────────────
         strategy_summary = ", ".join(
@@ -406,6 +442,7 @@ class RealtimeCandleEngine:
             "ai_insight":         insight_txt,
             "mtf_targets":        mtf_targets,
             "od_signals":         [self._od_signal_to_dict(s) for s in od_signals],
+            "sr_signals":         [self._sr_signal_to_dict(s) for s in sr_signals],
             "timestamp":          time.time(),
         }
 
@@ -637,6 +674,30 @@ class RealtimeCandleEngine:
                 )
             od_section = "\n\n📊 *Opening Drive Alerts:*\n" + "\n\n".join(od_lines)
 
+        # ── S/R levels alert section ──────────────────────────────
+        sr_section = ""
+        sr_list = sig.get("sr_signals", [])
+        if sr_list:
+            sr_lines = []
+            for sr in sr_list:
+                dir_em = "🟢" if sr["direction"] == "bullish" else "🔴"
+                prem   = " ⭐ PREMIUM" if sr.get("premium_setup") else ""
+                ltype  = sr.get("sr_level_type", "")
+                ltouch = sr.get("sr_level_touches", 0)
+                lstr   = sr.get("sr_level_strength", 0)
+                sr_lines.append(
+                    f"{dir_em} *[{sr['strategy_id']}] {sr['strategy_name']}*{prem}\n"
+                    f"  Level: ${sr['sr_level_price']}  ({ltype}  ·  {ltouch} touches  ·  strength {lstr})\n"
+                    f"  Entry: ${sr['entry']}  Stop: ${sr['stop']}\n"
+                    f"  T1: ${sr['t1']}  T2: ${sr['t2']}  R:R 1:{sr['rr']}\n"
+                    f"  Conf: {sr['confidence']}/100  ({sr['score']}/{sr['max_score']} conditions)"
+                )
+            sr_section = (
+                "\n\n📍 *S/R Strategy Signals (S20–S27):*\n"
+                "─────────────────────────────\n"
+                + "\n\n".join(sr_lines)
+            )
+
         text = (
             f"{emoji} *{symbol} {sig['action']} ALERT* — {sig['session_time']}\n"
             f"─────────────────────────────\n"
@@ -653,7 +714,8 @@ class RealtimeCandleEngine:
             f"📊 *Multi-Timeframe Price Targets:*\n"
             f"_TF  | Trend | ↑ Higher High  ↓ Lower Low_\n"
             f"{mtf_section}"
-            f"{od_section}\n\n"
+            f"{od_section}"
+            f"{sr_section}\n\n"
             f"🧠 *AI Insight:* _{sig['ai_insight']}_\n\n"
             f"⚠ _Educational only — not financial advice_"
         )
@@ -722,6 +784,31 @@ class RealtimeCandleEngine:
             "pm_high":        sig.pm_data.get("pm_high") if sig.pm_data else None,
             "pm_sr_levels":   sig.pm_data.get("pm_sr_levels", []) if sig.pm_data else [],
             "rvol_quality":   sig.pm_data.get("rvol_quality","") if sig.pm_data else "",
+        }
+
+    @staticmethod
+    def _sr_signal_to_dict(sig: SRStrategySignal) -> dict:
+        return {
+            "strategy_id":        sig.strategy_id,
+            "strategy_name":      sig.strategy_name,
+            "category":           sig.category,
+            "direction":          sig.direction,
+            "price":              sig.price,
+            "entry":              sig.entry,
+            "stop":               sig.stop,
+            "t1":                 sig.t1,
+            "t2":                 sig.t2,
+            "t3":                 sig.t3,
+            "rr":                 sig.rr,
+            "confidence":         sig.confidence,
+            "conditions_met":     sig.conditions_met,
+            "score":              sig.score,
+            "max_score":          sig.max_score,
+            "sr_level_price":     sig.sr_level_price,
+            "sr_level_type":      sig.sr_level_type.replace("_", " ").title(),
+            "sr_level_strength":  sig.sr_level_strength,
+            "sr_level_touches":   sig.sr_level_touches,
+            "premium_setup":      sig.premium_setup,
         }
 
     # ──────────────────────────────────────────────────────────────
