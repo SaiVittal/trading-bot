@@ -571,7 +571,7 @@ export default function Dashboard() {
             <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Session VWAP Floor</span>
             <span className="text-lg font-mono font-semibold text-violet-400 mt-1 flex items-center gap-2">
               <BarChart3 size={14} className="text-violet-400" />
-              ${activeAlerts.length > 0 ? activeAlerts[0].vwap.toFixed(2) : (currentPrice * 0.998).toFixed(2)}
+              ${activeAlerts.length > 0 && activeAlerts[0]?.vwap != null ? Number(activeAlerts[0].vwap).toFixed(2) : (currentPrice * 0.998).toFixed(2)}
             </span>
           </div>
 
@@ -790,15 +790,21 @@ export default function Dashboard() {
                     <div className="grid grid-cols-3 gap-2 text-[10px] font-mono mt-1 text-slate-400">
                       <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex flex-col gap-0.5 items-center">
                         <span className="text-slate-500 text-[8px] uppercase">RSI</span>
-                        <span className={`font-semibold ${sig.action === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>{sig.rsi}</span>
+                        <span className={`font-semibold ${sig.action === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>
+                          {sig.rsi != null ? Number(sig.rsi).toFixed(1) : "N/A"}
+                        </span>
                       </div>
                       <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex flex-col gap-0.5 items-center">
                         <span className="text-slate-500 text-[8px] uppercase">VWAP</span>
-                        <span className="font-semibold text-slate-300">${sig.vwap.toFixed(2)}</span>
+                        <span className="font-semibold text-slate-300">
+                          {sig.vwap != null ? `$${Number(sig.vwap).toFixed(2)}` : "N/A"}
+                        </span>
                       </div>
                       <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex flex-col gap-0.5 items-center">
                         <span className="text-slate-500 text-[8px] uppercase">Stop Loss</span>
-                        <span className="font-semibold text-amber-500">${sig.stop.toFixed(2)}</span>
+                        <span className="font-semibold text-amber-500">
+                          {sig.stop != null ? `$${Number(sig.stop).toFixed(2)}` : "N/A"}
+                        </span>
                       </div>
                     </div>
 
@@ -806,11 +812,15 @@ export default function Dashboard() {
                     <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-slate-400">
                       <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex justify-between items-center px-3">
                         <span className="text-slate-500 flex items-center gap-1"><Target size={8} /> T1:</span>
-                        <span className="font-semibold text-emerald-400">${sig.t1.toFixed(2)}</span>
+                        <span className="font-semibold text-emerald-400">
+                          {sig.t1 != null ? `$${Number(sig.t1).toFixed(2)}` : "N/A"}
+                        </span>
                       </div>
                       <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex justify-between items-center px-3">
                         <span className="text-slate-500 flex items-center gap-1"><Target size={8} /> T2:</span>
-                        <span className="font-semibold text-cyan-400">${sig.t2.toFixed(2)}</span>
+                        <span className="font-semibold text-cyan-400">
+                          {sig.t2 != null ? `$${Number(sig.t2).toFixed(2)}` : "N/A"}
+                        </span>
                       </div>
                     </div>
                   </div>

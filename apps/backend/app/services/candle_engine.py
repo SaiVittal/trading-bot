@@ -359,8 +359,14 @@ class RealtimeCandleEngine:
         )
 
         # ── Upgrade pipeline ─────────────────────────────────────
+        vwap_val = top.price
+        rsi_val  = 50.0
         try:
             df = self._indicator.run(df_raw)
+            if "VWAP" in df.columns:
+                vwap_val = float(df["VWAP"].iloc[-1])
+            if "RSI" in df.columns:
+                rsi_val = float(df["RSI"].iloc[-1])
 
             candle_data  = self._candles.run(df)
             mtf_data     = self._mtf.run(df_raw)
@@ -430,6 +436,8 @@ class RealtimeCandleEngine:
             "symbol":             symbol,
             "action":             action,
             "price":              top.price,
+            "vwap":               vwap_val,
+            "rsi":                rsi_val,
             "direction":          direction,
             # When no core strategies fire, list specialty signals so the
             # "Fired strategies" section in Telegram is never blank.
@@ -927,7 +935,7 @@ class RealtimeCandleEngine:
             tr  = pd.concat([(high - low), (high - pc).abs(), (low - pc).abs()], axis=1).max(axis=1)
             atr = float(tr.rolling(period).mean().iloc[-1])
             if math.isnan(atr) or atr <= 0:
-                atr = float((high - low).mean())
+                atr = (high - low).mean()
             atr = max(atr, cur * 0.001)   # floor at 0.1% of price
 
             # Swing high / low over last 5 bars
