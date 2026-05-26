@@ -36,6 +36,11 @@ PRICE_RANGES: dict[str, tuple[float, float]] = {
     "TSM":   (80,   250),
     "SMCI":  (15,   120),
     "ARM":   (80,   250),
+    "ASML":  (500,  1500),
+    "COST":  (400,  1200),
+    "MU":    (40,   300),
+    "NBIS":  (2,    80),
+    "SPX":   (3500, 7500),
     # Finance
     "JPM":   (150,  300),
     "GS":    (350,  700),

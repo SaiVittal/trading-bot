@@ -63,6 +63,18 @@ Add the custom MCP server in Cursor under **Settings** -> **Features** -> **MCP*
 
 ---
 
+## 🚀 Production Cloud Deployment (Free Tier)
+
+For a stable, live production environment, we deploy the platform to fully managed free cloud services:
+- **Frontend (Next.js)** is hosted on **Vercel** (Free serverless hosting).
+- **Backend (FastAPI)** is hosted on **Koyeb** or **Render** (Free container service).
+- **Postgres Database** is hosted on **Neon.tech** (Free serverless Postgres).
+- **In-Memory Store (Redis)** is hosted on **Upstash** (Free serverless Redis).
+
+For a complete step-by-step walkthrough, environment variable mapping, and database provisioning details, please refer to the [Production Deployment Guide (DEPLOYMENT.md)](./DEPLOYMENT.md).
+
+---
+
 ## 🚀 Local Setup & Dev Runnable Guide
 
 This guide details how to configure, boot, and run the entire trading platform stack locally.

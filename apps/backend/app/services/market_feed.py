@@ -18,7 +18,10 @@ REDIS_CONTROL_CHANNEL = "market:control"
 class MarketFeedManager:
     def __init__(self) -> None:
         # Dynamic active set of symbols to scrape and tick
-        self.watchlist: Set[str] = {"TSLA", "AAPL", "NVDA", "SPY", "MSFT"}
+        self.watchlist: Set[str] = {
+            "TSLA", "SPY", "MSFT", 
+            "NBIS", "META", "ASML", "COST", "AMD", "MU", "SPX"
+        }
         
 
 

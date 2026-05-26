@@ -65,10 +65,10 @@ export default function Dashboard() {
   // State variables
   const [connected, setConnected] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState<string>("TSLA");
-  const [watchlist, setWatchlist] = useState<string[]>(["TSLA", "AAPL", "NVDA", "SPY", "MSFT"]);
-  const [watchlistPrices, setWatchlistPrices] = useState<Record<string, number>>({
-    "TSLA": 412.68, "AAPL": 189.84, "NVDA": 942.50, "SPY": 530.10, "MSFT": 420.30
-  });
+  const [watchlist, setWatchlist] = useState<string[]>([
+    "TSLA", "AAPL", "NVDA", "SPY", "MSFT", "NBIS", "META", "ASML", "COST", "AMD", "QCOM", "MU", "SPX"
+  ]);
+  const [watchlistPrices, setWatchlistPrices] = useState<Record<string, number>>({});
   
   const [searchInput, setSearchInput] = useState<string>("");
   const [currentPrice, setCurrentPrice] = useState<number>(0);
@@ -119,7 +119,7 @@ export default function Dashboard() {
         symbol: selectedSymbol, open: 0, high: 0, low: 0, close: 0, volume: 0, timestamp: 0
       });
     } else {
-      const livePrice = watchlistPrices[selectedSymbol] || 150.00;
+      const livePrice = watchlistPrices[selectedSymbol] || 0;
       setCurrentPrice(livePrice);
       currentPriceRef.current = livePrice;
       setActiveCandle({
@@ -176,7 +176,6 @@ export default function Dashboard() {
     // 1. Add to local watchlist state if missing
     if (!watchlist.includes(symbol)) {
       setWatchlist(prev => [...prev, symbol]);
-      setWatchlistPrices(prev => ({ ...prev, [symbol]: 150.00 }));
     }
 
     // 2. Switch main view focus to searched asset
@@ -212,8 +211,28 @@ export default function Dashboard() {
     let reconnectAttempts = 0;
 
     const connect = () => {
-      logSystem("Opening connection to real-time WebSockets broadway...", "system");
-      ws = new WebSocket("ws://localhost:8000/api/v1/ws");
+      const envWsUrl = process.env.NEXT_PUBLIC_WS_URL;
+      let wsUrl: string;
+
+      if (envWsUrl) {
+        let url = envWsUrl;
+        if (url.startsWith("http://")) {
+          url = url.replace("http://", "ws://");
+        } else if (url.startsWith("https://")) {
+          url = url.replace("https://", "wss://");
+        }
+        if (!url.includes("/api/v1/ws")) {
+          const cleanUrl = url.endsWith("/") ? url.slice(0, -1) : url;
+          url = `${cleanUrl}/api/v1/ws`;
+        }
+        wsUrl = url;
+      } else {
+        const wsProtocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss" : "ws";
+        const wsHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
+        wsUrl = `${wsProtocol}://${wsHost}:8000/api/v1/ws`;
+      }
+
+      ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -526,7 +545,11 @@ export default function Dashboard() {
               <span className={`font-mono text-2xl font-bold tracking-tight transition-colors duration-300 ${
                 priceDiff === "up" ? "text-emerald-400" : priceDiff === "down" ? "text-rose-400" : "text-white"
               }`}>
-                ${currentPrice > 0 ? currentPrice.toLocaleString("en-US", { minimumFractionDigits: 2 }) : (watchlistPrices[selectedSymbol] || 150.00).toFixed(2)}
+                {currentPrice > 0 
+                  ? `$${currentPrice.toLocaleString("en-US", { minimumFractionDigits: 2 })}` 
+                  : (watchlistPrices[selectedSymbol] !== undefined
+                      ? `$${watchlistPrices[selectedSymbol].toLocaleString("en-US", { minimumFractionDigits: 2 })}` 
+                      : "Loading...")}
               </span>
             </div>
             <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
@@ -597,7 +620,7 @@ export default function Dashboard() {
             <div className="flex flex-col gap-2.5 overflow-y-auto max-h-[460px] pr-1">
               {watchlist.map(sym => {
                 const active = sym === selectedSymbol;
-                const price = watchlistPrices[sym] || 150.00;
+                const price = watchlistPrices[sym];
                 
                 return (
                   <div
@@ -619,10 +642,10 @@ export default function Dashboard() {
                     </div>
 
                     <div className="flex items-center gap-3 font-mono">
-                      <span className={`text-xs font-semibold ${
+                      <span className={`text-xs font-semibold font-mono ${
                         active ? "text-cyan-400" : "text-slate-300"
                       }`}>
-                        ${price.toFixed(2)}
+                        {price !== undefined ? `$${price.toLocaleString("en-US", { minimumFractionDigits: 2 })}` : "Loading..."}
                       </span>
 
                       {/* Remove Button for added tickers */}
