@@ -279,18 +279,20 @@ class SRLevelDetector:
         """
         try:
             tz = pytz.timezone("America/New_York")
-            if df.index.tzinfo is None:
+            dti = pd.DatetimeIndex(df.index)
+            if dti.tzinfo is None:
                 df = df.copy()
-                df.index = df.index.tz_localize("UTC").tz_convert(tz)
+                df.index = dti.tz_localize("UTC").tz_convert(tz)
             else:
                 df = df.copy()
-                df.index = df.index.tz_convert(tz)
+                df.index = dti.tz_convert(tz)
         except Exception:
             pass
 
         session_open = dtime(9, 30)
         orb_end = dtime(9, 30 + orb_minutes) if orb_minutes <= 30 else dtime(10, 0)
-        orb_mask = (df.index.time >= session_open) & (df.index.time < orb_end)
+        dti_new = pd.DatetimeIndex(df.index)
+        orb_mask = (dti_new.time >= session_open) & (dti_new.time < orb_end)
         orb_df   = df[orb_mask]
 
         if orb_df.empty:
@@ -318,10 +320,10 @@ class SRConfluenceEngine:
 
     def score_level(self, level: SRLevel,
                     all_levels: list,
-                    vwap: float = None,
-                    ema9: float = None,
-                    ema21: float = None,
-                    price: float = None) -> int:
+                    vwap: Optional[float] = None,
+                    ema9: Optional[float] = None,
+                    ema21: Optional[float] = None,
+                    price: Optional[float] = None) -> int:
         """
         Calculate confluence score for a level.
         More S/R types aligning = higher score = higher confidence.
@@ -849,7 +851,7 @@ class SRBreakoutLong(BaseSRStrategy):
         prior_high  = _get(df, "High",  idx=-2)
         prior_low   = _get(df, "Low",   idx=-2)
 
-        if any(v is None for v in [prior_close, prior_open, prior_high, prior_low]):
+        if prior_close is None or prior_open is None or prior_high is None or prior_low is None:
             return None
 
         prior_body  = abs(prior_close - prior_open)
@@ -1003,7 +1005,7 @@ class SRBreakdownShort(BaseSRStrategy):
         prior_high  = _get(df, "High",  idx=-2)
         prior_low   = _get(df, "Low",   idx=-2)
 
-        if any(v is None for v in [prior_close, prior_open, prior_high, prior_low]):
+        if prior_close is None or prior_open is None or prior_high is None or prior_low is None:
             return None
 
         prior_body  = abs(prior_close - prior_open)
@@ -1997,7 +1999,10 @@ class SRStrategyModule:
 
         df = prepare_sr_df(df_5m)
         price = _get(df, "Close")
-        atr   = _get(df, "ATR14") or price * 0.005
+        if price is None:
+            return []
+        raw_atr = _get(df, "ATR14")
+        atr: float = raw_atr if raw_atr is not None else price * 0.005
         vwap  = _get(df, "VWAP")
         ema9  = _get(df, "EMA9")
         ema21 = _get(df, "EMA21")

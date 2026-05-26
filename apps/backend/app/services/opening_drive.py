@@ -55,7 +55,7 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def _vwap(df: pd.DataFrame) -> pd.Series:
     df  = df.copy()
-    df["_dt"] = df.index.date
+    df["_dt"] = pd.DatetimeIndex(df.index).date
     tp  = (df["High"] + df["Low"] + df["Close"]) / 3
     tpv = tp * df["Volume"]
     return (tpv.groupby(df["_dt"]).cumsum() /
@@ -112,17 +112,18 @@ class PremarketAnalyser:
         # ── Identify premarket bars (before 9:30 AM ET) ──────
         tz = pytz.timezone("America/New_York")
         try:
-            if df.index.tzinfo is None:
+            dti = pd.DatetimeIndex(df.index)
+            if dti.tzinfo is None:
                 df = df.copy()
-                df.index = df.index.tz_localize("UTC").tz_convert(tz)
+                df.index = dti.tz_localize("UTC").tz_convert(tz)
             else:
                 df = df.copy()
-                df.index = df.index.tz_convert(tz)
+                df.index = dti.tz_convert(tz)
         except Exception:
             pass
 
         mkt_open = dtime(9, 30)
-        pm_mask  = df.index.time < mkt_open
+        pm_mask  = pd.DatetimeIndex(df.index).time < mkt_open
         pm_df    = df[pm_mask]
         reg_df   = df[~pm_mask]
 
