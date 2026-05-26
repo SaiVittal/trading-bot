@@ -259,16 +259,16 @@ class RealtimeCandleEngine:
         if df_raw is None:
             return
 
-        # ── Session gate ─────────────────────────────────────────
+        # ── Session gate (core strategies only) ──────────────────
         now_et  = datetime.now(ET)
         allowed = _session_allowed(now_et)
-        if not allowed:
-            logger.debug(f"{symbol}: outside trading session at {now_et.strftime('%H:%M ET')} — skipped.")
-            return
+        # NOTE: do NOT return here — specialty scans (OD/SR) run independently
+        # of the session gate and have their own time windows.
 
         # ── Run all 18 strategies across 1m / 5m / 10m / 15m ────
+        # Skip core scan outside trading hours to avoid false signals.
         try:
-            all_tf = self._scanner.scan_all_timeframes(symbol, df_raw)
+            all_tf = self._scanner.scan_all_timeframes(symbol, df_raw) if allowed else {}
         except Exception as e:
             logger.warning(f"StrategyScanner failed for {symbol}: {e}")
             all_tf = {}   # let specialty scans continue even if core fails
@@ -420,8 +420,18 @@ class RealtimeCandleEngine:
             "action":             action,
             "price":              top.price,
             "direction":          direction,
-            "strategies_fired":   [s.strategy_id for s in signals],
-            "strategy_names":     [s.strategy_name for s in signals],
+            # When no core strategies fire, list specialty signals so the
+            # "Fired strategies" section in Telegram is never blank.
+            "strategies_fired":   (
+                [s.strategy_id   for s in signals]
+                if signals else
+                [s.strategy_id   for s in (od_signals + sr_signals)]
+            ),
+            "strategy_names":     (
+                [s.strategy_name for s in signals]
+                if signals else
+                [s.strategy_name for s in (od_signals + sr_signals)]
+            ),
             "top_strategy":       top.strategy_id,
             "top_strategy_name":  top.strategy_name,
             "top_category":       top.category,
@@ -529,7 +539,7 @@ class RealtimeCandleEngine:
         )
         conditions = "\n".join(f"  ✅ {c}" for c in sig.get("conditions_met", [])[:4])
         exp        = sig.get("expected_range", [])
-        rng_str    = f"${exp[0]} → ${exp[1]}" if len(exp) == 2 else "N/A"
+        rng_str    = f"${exp[0]:.2f} → ${exp[1]:.2f}" if len(exp) == 2 else "N/A"
         patterns   = ", ".join(p.replace("_", " ") for p in sig.get("patterns", [])) or "None"
 
         # ── Multi-timeframe target table ──────────────────────────
@@ -545,13 +555,13 @@ class RealtimeCandleEngine:
                 mtf_lines.append(f"`{tf:<3}` {ticon}  —  insufficient data")
             elif tf == "1d":
                 mtf_lines.append(
-                    f"`{tf:<3}` {ticon}  Hi ${row['swing_high']}  Lo ${row['swing_low']}"
-                    f"  →  ↑${hh}  ↓${ll}"
+                    f"`{tf:<3}` {ticon}  Hi ${row['swing_high']:.2f}  Lo ${row['swing_low']:.2f}"
+                    f"  →  ↑${hh:.2f}  ↓${ll:.2f}"
                 )
             else:
                 rsi_str = f"  RSI:{rsi:.0f}" if rsi is not None else ""
                 mtf_lines.append(
-                    f"`{tf:<3}` {ticon}  ↑${hh}  ↓${ll}{rsi_str}"
+                    f"`{tf:<3}` {ticon}  ↑${hh:.2f}  ↓${ll:.2f}{rsi_str}"
                 )
         mtf_section = "\n".join(mtf_lines) if mtf_lines else "  N/A"
 
@@ -589,9 +599,9 @@ class RealtimeCandleEngine:
                 lstr   = sr.get("sr_level_strength", 0)
                 sr_lines.append(
                     f"{dir_em} *[{sr['strategy_id']}] {sr['strategy_name']}*{prem}\n"
-                    f"  Level: ${sr['sr_level_price']}  ({ltype}  ·  {ltouch} touches  ·  strength {lstr})\n"
-                    f"  Entry: ${sr['entry']}  Stop: ${sr['stop']}\n"
-                    f"  T1: ${sr['t1']}  T2: ${sr['t2']}  R:R 1:{sr['rr']}\n"
+                    f"  Level: ${sr['sr_level_price']:.2f}  ({ltype}  ·  {ltouch} touches  ·  strength {lstr})\n"
+                    f"  Entry: ${sr['entry']:.2f}  Stop: ${sr['stop']:.2f}\n"
+                    f"  T1: ${sr['t1']:.2f}  T2: ${sr['t2']:.2f}  R:R 1:{sr['rr']}\n"
                     f"  Conf: {sr['confidence']}/100  ({sr['score']}/{sr['max_score']} conditions)"
                 )
             sr_section = (
