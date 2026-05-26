@@ -122,7 +122,7 @@ class RealtimeCandleEngine:
         self._risk       = RiskEngine()
         self._insight    = InsightGenerator()
         self._formatter  = AlertFormatter()
-        self._od_module      = OpeningDriveModule(min_confidence=55, min_rvol=3.0, min_gap_pct=3.0)
+        self._od_module      = OpeningDriveModule(min_confidence=55, min_rvol=1.5, min_gap_pct=0.5)
         self._sr_module      = SRStrategyModule(min_confidence=55)
         self._vwap_module    = VWAPStrategyModule(min_confidence=55)
         self._s28_strategy   = VWAPBoxBreakoutStrategy()
@@ -276,7 +276,7 @@ class RealtimeCandleEngine:
             all_tf = self._scanner.scan_all_timeframes(symbol, df_raw)
         except Exception as e:
             logger.warning(f"StrategyScanner failed for {symbol}: {e}")
-            return
+            all_tf = {}   # let specialty scans continue even if core fails
 
         # ── Apply session + per-strategy confidence filters ───────
         filtered: Dict[str, StrategySignal] = {}   # strategy_id → best signal
@@ -292,21 +292,79 @@ class RealtimeCandleEngine:
                         sig.confidence > filtered[sig.strategy_id].confidence):
                     filtered[sig.strategy_id] = sig
 
-        if not filtered:
+        # ── Specialty scans — run independently of core strategy gate ─
+        od_signals: List[OpeningDriveSignal] = []
+        od_start, od_end = OPENING_DRIVE_WINDOW
+        if od_start <= now_et.time() < od_end:
+            try:
+                prior_close = self.prior_closes.get(symbol)
+                od_signals  = self._od_module.scan(symbol, df_raw, prior_close)
+                if od_signals:
+                    logger.info(
+                        f"{symbol}: {len(od_signals)} Opening Drive signal(s) — "
+                        f"{[s.strategy_id for s in od_signals]}"
+                    )
+            except Exception as e:
+                logger.warning(f"Opening Drive scan failed for {symbol}: {e}")
+
+        sr_signals: List[SRStrategySignal] = []
+        try:
+            pdd      = self.prior_day_data.get(symbol)
+            df_prior = pd.DataFrame([pdd]) if pdd else None
+            sr_signals = self._sr_module.scan(symbol, df_raw, df_prior)
+            if sr_signals:
+                logger.info(
+                    f"{symbol}: {len(sr_signals)} S/R signal(s) — "
+                    f"{[s.strategy_id for s in sr_signals]}"
+                )
+        except Exception as e:
+            logger.warning(f"S/R scan failed for {symbol}: {e}")
+
+        vwap_signals: List[VWAPSignal] = []
+        try:
+            vwap_signals = self._vwap_module.scan(symbol, df_raw)
+            if vwap_signals:
+                logger.info(
+                    f"{symbol}: {len(vwap_signals)} VWAP signal(s) — "
+                    f"{[s.strategy_id for s in vwap_signals]}"
+                )
+        except Exception as e:
+            logger.warning(f"VWAP scan failed for {symbol}: {e}")
+
+        s28_signals: List[VWAPBreakoutSignal] = []
+        try:
+            s28_sig = self._s28_strategy.check(symbol, df_raw)
+            if s28_sig and s28_sig.confidence >= 65:
+                s28_signals = [s28_sig]
+                logger.info(
+                    f"{symbol}: S28 fired — conf:{s28_sig.confidence} quality:{s28_sig.quality}"
+                )
+        except Exception as e:
+            logger.warning(f"S28 scan failed for {symbol}: {e}")
+
+        # ── Gate: need at least one signal from any module ────────
+        if not (filtered or od_signals or sr_signals or vwap_signals or s28_signals):
             return
 
-        signals = sorted(filtered.values(), key=lambda s: s.confidence, reverse=True)
-
-        # ── Consensus direction ───────────────────────────────────
-        bull = sum(1 for s in signals if s.direction == "bullish")
-        bear = sum(1 for s in signals if s.direction == "bearish")
-        direction = "bullish" if bull >= bear else "bearish"
-
-        # Re-rank: direction-aligned signals first, then by confidence
-        signals = sorted(signals,
-                         key=lambda s: (s.direction != direction, -s.confidence))
-        top = signals[0]
-        action = "BUY" if direction == "bullish" else "SELL"
+        # ── Build primary signal context ──────────────────────────
+        if filtered:
+            signals = sorted(filtered.values(), key=lambda s: s.confidence, reverse=True)
+            bull = sum(1 for s in signals if s.direction == "bullish")
+            bear = sum(1 for s in signals if s.direction == "bearish")
+            direction = "bullish" if bull >= bear else "bearish"
+            signals = sorted(signals,
+                             key=lambda s: (s.direction != direction, -s.confidence))
+            top    = signals[0]
+            action = "BUY" if direction == "bullish" else "SELL"
+        else:
+            # Specialty-only alert: build from best available specialty signal
+            signals   = []
+            best_spec = (od_signals + s28_signals + vwap_signals + sr_signals)[0]
+            direction = best_spec.direction
+            action    = "BUY" if direction == "bullish" else "SELL"
+            bull      = 1 if direction == "bullish" else 0
+            bear      = 1 if direction == "bearish" else 0
+            top       = self._make_top_from_specialty(best_spec)
 
         # ── Price sanity guard — never alert with wrong price ─────
         if not is_price_sane(symbol, top.price):
@@ -334,58 +392,9 @@ class RealtimeCandleEngine:
             prob_data    = self._prob.run(mtf_data, df, vol_data, volume_data, candle_data)
             mtf_targets  = self._compute_mtf_targets(df_raw)
 
-            # Opening Drive scan (9:30–10:30 ET only)
-            od_signals: List[OpeningDriveSignal] = []
-            od_start, od_end = OPENING_DRIVE_WINDOW
-            if od_start <= now_et.time() < od_end:
-                try:
-                    prior_close = self.prior_closes.get(symbol)
-                    od_signals  = self._od_module.scan(symbol, df_raw, prior_close)
-                except Exception as e:
-                    logger.warning(f"Opening Drive scan failed for {symbol}: {e}")
-
-            # ── S/R strategies scan (S20–S27) ────────────────────────
-            sr_signals: List[SRStrategySignal] = []
-            try:
-                # Build prior-day DataFrame for PDH/PDL and pivot levels
-                pdd = self.prior_day_data.get(symbol)
-                df_prior = pd.DataFrame([pdd]) if pdd else None
-                sr_signals = self._sr_module.scan(symbol, df_raw, df_prior)
-                if sr_signals:
-                    logger.info(
-                        f"{symbol}: {len(sr_signals)} S/R signal(s) fired — "
-                        f"{[s.strategy_id for s in sr_signals]}"
-                    )
-            except Exception as e:
-                logger.warning(f"S/R scan failed for {symbol}: {e}")
-
-            # ── VWAP strategies scan (V-R1 through V-D3) ─────────────
-            vwap_signals: List[VWAPSignal] = []
-            try:
-                vwap_signals = self._vwap_module.scan(symbol, df_raw)
-                if vwap_signals:
-                    logger.info(
-                        f"{symbol}: {len(vwap_signals)} VWAP signal(s) fired — "
-                        f"{[s.strategy_id for s in vwap_signals]}"
-                    )
-            except Exception as e:
-                logger.warning(f"VWAP strategies scan failed for {symbol}: {e}")
-
-            # ── S28 VWAP Box Breakout scan ────────────────────────────
-            s28_signals: List[VWAPBreakoutSignal] = []
-            try:
-                s28_sig = self._s28_strategy.check(symbol, df_raw)
-                if s28_sig and s28_sig.confidence >= 65:
-                    s28_signals = [s28_sig]
-                    logger.info(
-                        f"{symbol}: S28 VWAP Box Breakout fired — "
-                        f"conf:{s28_sig.confidence} quality:{s28_sig.quality}"
-                    )
-            except Exception as e:
-                logger.warning(f"S28 scan failed for {symbol}: {e}")
-
             # Use upgrade engine confidence as secondary filter if configured
-            if prob_data["confidence"] < settings.MIN_CONFIDENCE and len(signals) < 2:
+            # (bypass gate when only specialty signals fired — they have their own confidence)
+            if signals and prob_data["confidence"] < settings.MIN_CONFIDENCE and len(signals) < 2:
                 logger.info(
                     f"{symbol}: upgrade engine confidence {prob_data['confidence']}/100 "
                     f"< {settings.MIN_CONFIDENCE} and only 1 strategy fired — suppressed."
@@ -417,10 +426,6 @@ class RealtimeCandleEngine:
                            "support": [], "resistance": [], "atr": 0, "sr_target": None}
             insight_txt = f"Strategy cluster for {symbol} — {len(signals)} signal(s) fired."
             mtf_targets  = self._compute_mtf_targets(df_raw)
-            od_signals: List[OpeningDriveSignal] = []
-            sr_signals: List[SRStrategySignal] = []
-            vwap_signals: List[VWAPSignal] = []
-            s28_signals: List[VWAPBreakoutSignal] = []
 
         # ── Build alert payloads ──────────────────────────────────
         strategy_summary = ", ".join(
@@ -814,6 +819,24 @@ class RealtimeCandleEngine:
     # ──────────────────────────────────────────────────────────────
     #  Fallback helpers
     # ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_top_from_specialty(sig) -> object:
+        """Wrap a specialty signal (OD/SR/VWAP/S28) as a StrategySignal-compatible namespace."""
+        import types
+        return types.SimpleNamespace(
+            strategy_id      = getattr(sig, "strategy_id",  "S-SPEC"),
+            strategy_name    = getattr(sig, "strategy_name", "Specialty"),
+            category         = getattr(sig, "category",      "SPECIALTY"),
+            price            = sig.price,
+            conditions_met   = getattr(sig, "conditions_met",   []),
+            conditions_missed= getattr(sig, "conditions_missed", []),
+            score            = getattr(sig, "score",    0),
+            max_score        = getattr(sig, "max_score", 8),
+            confidence       = getattr(sig, "confidence", 0),
+            direction        = getattr(sig, "direction", "bullish"),
+            data             = {},
+        )
 
     @staticmethod
     def _basic_risk(price: float, direction: str, atr: float) -> dict:

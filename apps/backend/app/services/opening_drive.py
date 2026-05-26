@@ -353,9 +353,11 @@ class OpeningDriveGapBreakout:
             "EMA9 sloping upward",
             "Volume expanding on breakout",
         ]
-        pm_high = pm.get("pm_high", price)
-        gap_ok  = abs(pm.get("gap_pct", 0)) >= 3.0
-        rvol_ok = pm.get("rvol", 0) >= 3.0
+        pm_high  = pm.get("pm_high", price)
+        _min_gap = pm.get("_min_gap_pct", 3.0)
+        _min_vol = pm.get("_min_rvol", 3.0)
+        gap_ok  = abs(pm.get("gap_pct", 0)) >= _min_gap
+        rvol_ok = pm.get("rvol", 0) >= _min_vol
         broke   = cl > pm_high and o <= pm_high
         strong  = body / rng > 0.60
         rsi_ok  = (rsi or 0) > 55
@@ -477,8 +479,10 @@ class OpeningDrivePullback:
         # Trendline intact
         trend_ok = pm.get("trendline_up", True)
         # Gap qualified
-        gap_ok   = abs(pm.get("gap_pct",0)) >= 3.0
-        rvol_ok  = pm.get("rvol",0) >= 3.0
+        _min_gap = pm.get("_min_gap_pct", 3.0)
+        _min_vol = pm.get("_min_rvol", 3.0)
+        gap_ok   = abs(pm.get("gap_pct", 0)) >= _min_gap
+        rvol_ok  = pm.get("rvol", 0) >= _min_vol
         # Bullish wick (hammer-like)
         wick_ok  = lw > body * 0.8 or (cl > o and body/rng > 0.5)
         # Above VWAP
@@ -582,8 +586,10 @@ class OpeningDriveRSIDivergence:
         if not hidden_bull: return None
 
         div_details = div.get("bull_details", {})
-        gap_ok  = abs(pm.get("gap_pct",0)) >= 3.0
-        rvol_ok = pm.get("rvol",0) >= 3.0
+        _min_gap = pm.get("_min_gap_pct", 3.0)
+        _min_vol = pm.get("_min_rvol", 3.0)
+        gap_ok  = abs(pm.get("gap_pct", 0)) >= _min_gap
+        rvol_ok = pm.get("rvol", 0) >= _min_vol
         rsi_ok  = 38 <= (rsi or 50) <= 60
         above_vwap = price >= (vwap or price*0.99)
 
@@ -703,6 +709,9 @@ class OpeningDriveModule:
 
         # 1. Premarket analysis
         pm = self.pm_analyser.analyse(df, prior_close)
+        # Inject configured thresholds so each strategy can use them
+        pm["_min_gap_pct"] = self.min_gap_pct
+        pm["_min_rvol"]    = self.min_rvol
 
         # Gate: skip if gap/rvol too low
         if abs(pm.get("gap_pct", 0)) < self.min_gap_pct:
