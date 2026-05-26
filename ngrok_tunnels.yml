@@ -1,0 +1,12 @@
+version: "3"
+agent:
+  authtoken: "2bIvF8Zy7tZj1jxfeBsPFODtChq_6w62VtPRKKPLUZKzALBvP"
+tunnels:
+  backend:
+    proto: http
+    addr: 8000
+    host_header: localhost:8000
+  frontend:
+    proto: http
+    addr: 3000
+    host_header: localhost:3000
