@@ -19,9 +19,6 @@ try:
 except ImportError:
     USE_PTA = False
 
-SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL", "")
-
-
 # ══════════════════════════════════════════════════════════════
 #  1. INDICATOR ENGINE
 # ══════════════════════════════════════════════════════════════
@@ -65,7 +62,7 @@ class IndicatorEngine:
         loss  = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
         df["RSI"] = 100 - (100 / (1 + gain / (loss + 1e-10)))
 
-        df["_date"] = df.index.date
+        df["_date"] = pd.DatetimeIndex(df.index).date
         tp  = (df["High"] + df["Low"] + df["Close"]) / 3
         tpv = tp * df["Volume"]
         df["VWAP"] = (
@@ -272,13 +269,17 @@ class MultiTimeframeEngine:
             else:                                        trend = "neutral"
 
             stoch_signal = "neutral"
-            k  = cur.get("STC_K"); d  = cur.get("STC_D")
-            pk = prv.get("STC_K"); pd_ = prv.get("STC_D")
-            if all(v is not None and not (isinstance(v, float) and math.isnan(float(v)))
-                   for v in [k, d, pk, pd_]):
-                k, d, pk, pd_ = float(k), float(d), float(pk), float(pd_)
-                if pk < pd_ and k > d and k < 30:  stoch_signal = "bullish_cross"
-                elif pk > pd_ and k < d and k > 70: stoch_signal = "bearish_cross"
+            k = cur.get("STC_K")
+            d = cur.get("STC_D")
+            pk = prv.get("STC_K")
+            pd_ = prv.get("STC_D")
+            if k is not None and d is not None and pk is not None and pd_ is not None:
+                k_val = float(k)
+                d_val = float(d)
+                pk_val = float(pk)
+                pd_val = float(pd_)
+                if pk_val < pd_val and k_val > d_val and k_val < 30:  stoch_signal = "bullish_cross"
+                elif pk_val > pd_val and k_val < d_val and k_val > 70: stoch_signal = "bearish_cross"
 
             rsi_val   = cur.get("RSI")
             vwap_val  = cur.get("VWAP")
@@ -600,55 +601,3 @@ class AlertFormatter:
             f"  ⚠  Educational only — not financial advice\n"
             f"{sep}"
         )
-
-    def format_slack(self, ticker: str, prob: dict, mtf: dict,
-                     vol: dict, volume: dict, candles: dict,
-                     price_range: dict, risk: dict, insight: str) -> dict:
-        d      = prob["direction"]
-        emoji  = "🔴" if d == "bearish" else "🟢"
-        color  = "#a32d2d" if d == "bearish" else "#1D9E75"
-        scores = prob["scores"]
-
-        tf_text = "  ".join(
-            f"{'1m' if tf == 'base' else tf}: "
-            f"{'▼' if mtf['timeframes'].get(tf, {}).get('trend') == 'bearish' else '▲' if mtf['timeframes'].get(tf, {}).get('trend') == 'bullish' else '—'}"
-            for tf in ["base", "5m", "15m", "1h"]
-        )
-        patterns_str = (", ".join(p.replace("_", " ") for p in candles["patterns"][:3])
-                        if candles["patterns"] else "None")
-        score_bar = "█" * (prob["confidence"] // 10) + "░" * (10 - prob["confidence"] // 10)
-
-        blocks = [
-            {"type": "header", "text": {"type": "plain_text",
-             "text": f"{emoji} {ticker} {d.upper()} ALERT — {prob['confidence_label']} CONFIDENCE"}},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Entry*\n${risk['entry']}"},
-                {"type": "mrkdwn", "text": f"*Stop*\n${risk['stop']}"},
-                {"type": "mrkdwn", "text": f"*Target 1*\n${risk['t1']} (50%)"},
-                {"type": "mrkdwn", "text": f"*Target 2*\n${risk['t2']} (100%)"},
-                {"type": "mrkdwn", "text": f"*R:R*\n1:{risk['rr']}"},
-                {"type": "mrkdwn", "text": f"*Confidence*\n{prob['confidence']}/100"},
-            ]},
-            {"type": "divider"},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Expected Range*\n${price_range['expected_low']} → ${price_range['expected_high']}"},
-                {"type": "mrkdwn", "text": f"*Continuation*\n{prob['continuation_probability']}%  |  Reversal {prob['reversal_probability']}%"},
-                {"type": "mrkdwn", "text": f"*Timeframes*\n{tf_text}"},
-                {"type": "mrkdwn", "text": f"*Volume*\n{volume['rel_vol']}× avg {'🔥' if volume['spike'] else ''}"},
-                {"type": "mrkdwn", "text": f"*Volatility*\n{vol['regime'].upper()} (ATR {'↑' if vol['expanding'] else '→'})"},
-                {"type": "mrkdwn", "text": f"*Patterns*\n{patterns_str}"},
-            ]},
-            {"type": "divider"},
-            {"type": "section", "text": {"type": "mrkdwn",
-             "text": (f"*Score:* `{score_bar}` {prob['confidence']}/100\n"
-                      f"Trend {scores['trend']} | Mom {scores['momentum']} "
-                      f"| Vol {scores['volume']} | Pattern {scores['pattern']}")}},
-            {"type": "section", "text": {"type": "mrkdwn",
-             "text": f"*🧠 AI Insight*\n_{insight}_"}},
-            {"type": "context", "elements": [{"type": "mrkdwn",
-             "text": f"⏱ {datetime.now().strftime('%H:%M ET')}  |  Not financial advice"}]},
-        ]
-        return {
-            "text": f"{emoji} {ticker} {d.upper()} @ ${risk['entry']}",
-            "attachments": [{"color": color, "blocks": blocks}],
-        }

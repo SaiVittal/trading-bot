@@ -33,8 +33,6 @@ class Settings(BaseSettings):
     ALPACA_API_KEY_ID:    Optional[str] = Field(None, validation_alias="ALPACA_API_KEY_ID")
     ALPACA_API_SECRET_KEY: Optional[str] = Field(None, validation_alias="ALPACA_API_SECRET_KEY")
 
-    # Slack
-    SLACK_WEBHOOK_URL: Optional[str] = Field(None, validation_alias="SLACK_WEBHOOK_URL")
 
     # Telegram
     TELEGRAM_BOT_TOKEN:    Optional[str] = Field(None,  validation_alias="TELEGRAM_BOT_TOKEN")

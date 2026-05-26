@@ -5,7 +5,7 @@ import math
 import time
 from collections import deque
 from datetime import datetime, time as dtime
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -292,7 +292,7 @@ class RealtimeCandleEngine:
         od_start, od_end = OPENING_DRIVE_WINDOW
         if od_start <= now_et.time() < od_end:
             try:
-                prior_close = self.prior_closes.get(symbol)
+                prior_close = self.prior_closes.get(symbol) or 0.0
                 od_signals  = self._od_module.scan(symbol, df_raw, prior_close)
                 if od_signals:
                     logger.info(
@@ -305,7 +305,7 @@ class RealtimeCandleEngine:
         sr_signals: List[SRStrategySignal] = []
         try:
             pdd      = self.prior_day_data.get(symbol)
-            df_prior = pd.DataFrame([pdd]) if pdd else None
+            df_prior = pd.DataFrame([pdd]) if pdd else pd.DataFrame()
             sr_signals = self._sr_module.scan(symbol, df_raw, df_prior)
             if sr_signals:
                 logger.info(
@@ -415,13 +415,6 @@ class RealtimeCandleEngine:
             f"| R:R 1:{risk_data['rr']} | Conf: {top.confidence}/100 "
             f"| {now_et.strftime('%H:%M ET')}"
         )
-
-        slack_payload = self._build_slack_payload(
-            symbol, direction, signals, top, risk_data,
-            prob_data, range_data, vol_data, volume_data,
-            candle_data, insight_txt, bull, bear, mtf_targets,
-        )
-
         alert_payload = {
             "symbol":             symbol,
             "action":             action,
@@ -468,9 +461,6 @@ class RealtimeCandleEngine:
             if not task.cancelled() and task.exception():
                 logger.error(f"{label} dispatch failed: {task.exception()}")
 
-        slack_t = asyncio.create_task(self._dispatch_slack(slack_payload))
-        slack_t.add_done_callback(lambda t: _on_done(t, "Slack"))
-
         tg_t = asyncio.create_task(self._dispatch_telegram(alert_payload))
         tg_t.add_done_callback(lambda t: _on_done(t, "Telegram"))
 
@@ -478,86 +468,6 @@ class RealtimeCandleEngine:
     #  Slack Block Kit builder — combines scanner + upgrade engine
     # ──────────────────────────────────────────────────────────────
 
-    def _build_slack_payload(
-        self, symbol: str, direction: str,
-        signals: List[StrategySignal], top: StrategySignal,
-        risk: dict, prob: dict, rng: dict,
-        vol: dict, volume: dict, candles: dict,
-        insight: str, bull: int, bear: int,
-        mtf_targets: Optional[List[dict]] = None,
-    ) -> dict:
-        emoji  = "🟢" if direction == "bullish" else "🔴"
-        color  = "#1D9E75" if direction == "bullish" else "#a32d2d"
-        cat_em = CATEGORY_EMOJI.get(top.category, "📊")
-
-        strat_list = "\n".join(
-            f"{CATEGORY_EMOJI.get(s.category,'📊')} *[{s.strategy_id}] {s.strategy_name}* "
-            f"— {s.confidence}/100  ({s.score}/{s.max_score} conditions)"
-            for s in signals[:5]
-        )
-        cond_list = "\n".join(f"✅ {c}" for c in top.conditions_met)
-        missed    = "\n".join(f"○ {c}" for c in top.conditions_missed[:2]) if top.conditions_missed else ""
-
-        patterns_str = (", ".join(p.replace("_", " ") for p in candles["patterns"][:3])
-                        if candles["patterns"] else "None")
-        score_bar = "█" * (top.confidence // 10) + "░" * (10 - top.confidence // 10)
-        exp_range = f"${rng['expected_low']} → ${rng['expected_high']}"
-
-        blocks = [
-            {"type": "header", "text": {"type": "plain_text",
-             "text": f"{emoji} {symbol} {direction.upper()} — {top.strategy_name} "
-                     f"| {len(signals)} Strategy Consensus"}},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Entry*\n${risk['entry']}"},
-                {"type": "mrkdwn", "text": f"*Stop*\n${risk['stop']}"},
-                {"type": "mrkdwn", "text": f"*Target 1*\n${risk['t1']} (50%)"},
-                {"type": "mrkdwn", "text": f"*Target 2*\n${risk['t2']} (100%)"},
-                {"type": "mrkdwn", "text": f"*R:R*\n1:{risk['rr']}"},
-                {"type": "mrkdwn", "text": f"*Consensus*\n{bull} Bull / {bear} Bear"},
-            ]},
-            {"type": "divider"},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f"*Expected Range*\n{exp_range}"},
-                {"type": "mrkdwn", "text": f"*Upgrade Confidence*\n{prob.get('confidence',0)}/100"},
-                {"type": "mrkdwn", "text": f"*Volume*\n{volume['rel_vol']}× avg {'🔥' if volume['spike'] else ''}"},
-                {"type": "mrkdwn", "text": f"*Volatility*\n{vol['regime'].upper()} (ATR {'↑' if vol['expanding'] else '→'})"},
-                {"type": "mrkdwn", "text": f"*Patterns*\n{patterns_str}"},
-                {"type": "mrkdwn", "text": f"*Session*\n{datetime.now(ET).strftime('%H:%M ET')}"},
-            ]},
-            {"type": "divider"},
-            {"type": "section", "text": {"type": "mrkdwn",
-             "text": f"*{cat_em} Fired Strategies ({len(signals)})* — "
-                     f"Confidence `{score_bar}` {top.confidence}/100\n{strat_list}"}},
-            {"type": "section", "text": {"type": "mrkdwn",
-             "text": f"*Conditions met ({top.score}/{top.max_score}):*\n{cond_list}"
-                     + (f"\n*Not met:*\n{missed}" if missed else "")}},
-            {"type": "section", "text": {"type": "mrkdwn",
-             "text": f"*🧠 AI Insight*\n_{insight}_"}},
-        ]
-
-        # MTF price target table
-        if mtf_targets:
-            _TI = {"bullish": "📈", "bearish": "📉", "neutral": "➡", "n/a": "❓"}
-            rows = []
-            for r in mtf_targets:
-                ti = _TI.get(r.get("trend", "n/a"), "❓")
-                hh = r.get("proj_hh"); ll = r.get("proj_ll")
-                tf = r.get("tf", "?")
-                if hh and ll:
-                    rsi_s = f" RSI:{r['rsi']:.0f}" if r.get("rsi") else ""
-                    rows.append(f"`{tf:<3}` {ti}  ↑${hh}  ↓${ll}{rsi_s}")
-            if rows:
-                blocks.append({"type": "section", "text": {"type": "mrkdwn",
-                    "text": "*📊 Multi-Timeframe Targets* (↑ Higher High  ↓ Lower Low)\n"
-                            + "\n".join(rows)}})
-
-        blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
-             "text": "⚠ Educational only — not financial advice"}]})
-        return {
-            "text": f"{emoji} {symbol} {direction.upper()} @ ${top.price} "
-                    f"({len(signals)} strategies aligned)",
-            "attachments": [{"color": color, "blocks": blocks}],
-        }
 
     # ──────────────────────────────────────────────────────────────
     #  OpenAI insight enhancement
@@ -565,7 +475,7 @@ class RealtimeCandleEngine:
 
     async def _enhance_insight(
         self, symbol: str, action: str, price: float,
-        prob: dict, top: StrategySignal, base: str
+        prob: dict, top: Any, base: str
     ) -> str:
         if not self._openai:
             return base
@@ -593,24 +503,6 @@ class RealtimeCandleEngine:
         except Exception as e:
             logger.warning(f"OpenAI insight failed for {symbol}: {e}")
             return base
-
-    # ──────────────────────────────────────────────────────────────
-    #  Slack dispatch
-    # ──────────────────────────────────────────────────────────────
-
-    async def _dispatch_slack(self, payload: dict) -> None:
-        webhook = settings.SLACK_WEBHOOK_URL or ""
-        if not webhook:
-            return
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(webhook, json=payload, timeout=5.0)
-                if resp.status_code == 200:
-                    logger.info("Slack alert dispatched.")
-                else:
-                    logger.warning(f"Slack returned HTTP {resp.status_code}.")
-        except Exception as e:
-            logger.error(f"Slack dispatch error: {e}")
 
     # ──────────────────────────────────────────────────────────────
     #  Telegram dispatch
@@ -747,7 +639,7 @@ class RealtimeCandleEngine:
     # ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _make_top_from_specialty(sig) -> object:
+    def _make_top_from_specialty(sig) -> Any:
         """Wrap a specialty signal (OD/SR/VWAP/S28) as a StrategySignal-compatible namespace."""
         import types
         return types.SimpleNamespace(

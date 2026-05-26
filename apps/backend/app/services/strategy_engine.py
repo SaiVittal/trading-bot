@@ -134,7 +134,7 @@ class _Indicators:
         g = d.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
         l = (-d.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
         df["RSI"] = 100 - (100/(1+g/(l+1e-10)))
-        df["_dt"] = df.index.date
+        df["_dt"] = pd.DatetimeIndex(df.index).date
         tp  = (df["High"]+df["Low"]+df["Close"])/3
         tpv = tp * df["Volume"]
         df["VWAP"] = (tpv.groupby(df["_dt"]).cumsum() /
@@ -153,12 +153,14 @@ class _Indicators:
         return df
 
     @staticmethod
-    def get_val(df, col, idx=-1, default=None):
+    def get_val(df, col, idx=-1, default=0.0) -> float:
         try:
             v = df[col].iloc[idx]
-            return float(v) if not (isinstance(v, float) and math.isnan(v)) else default
+            if isinstance(v, float) and math.isnan(v):
+                return float(default) if default is not None else 0.0
+            return float(v)
         except Exception:
-            return default
+            return float(default) if default is not None else 0.0
 
 
 I = _Indicators   # shorthand
@@ -1503,44 +1505,6 @@ class StrategyScanner:
   ⚠  Educational only — not financial advice
 {sep}"""
         return msg
-
-    def format_slack_blocks(self, ticker: str,
-                             signals: list[StrategySignal]) -> dict:
-        """Slack Block Kit payload for all fired strategies."""
-        if not signals: return {}
-        top   = signals[0]
-        color = "#1D9E75" if top.direction=="bullish" else "#a32d2d"
-        emoji = "🟢" if top.direction=="bullish" else "🔴"
-        cat_em= self.CATEGORY_EMOJI.get(top.category,"📊")
-
-        strat_list = "\n".join(
-            f"{self.CATEGORY_EMOJI.get(s.category,'📊')} *{s.strategy_name}* — {s.confidence}/100"
-            for s in signals
-        )
-        cond_list = "\n".join(f"✅ {c}" for c in top.conditions_met)
-
-        blocks = [
-            {"type":"header","text":{"type":"plain_text",
-              "text":f"{emoji} {ticker} {top.direction.upper()} — {top.strategy_name}"}},
-            {"type":"section","fields":[
-                {"type":"mrkdwn","text":f"*Entry*\n${top.entry}"},
-                {"type":"mrkdwn","text":f"*Stop*\n${top.stop}"},
-                {"type":"mrkdwn","text":f"*T1*\n${top.t1}"},
-                {"type":"mrkdwn","text":f"*T2*\n${top.t2}"},
-                {"type":"mrkdwn","text":f"*R:R*\n1:{top.rr}"},
-                {"type":"mrkdwn","text":f"*Confidence*\n{top.confidence}/100"},
-            ]},
-            {"type":"divider"},
-            {"type":"section","text":{"type":"mrkdwn",
-              "text":f"*{cat_em} Fired Strategies ({len(signals)}):*\n{strat_list}"}},
-            {"type":"divider"},
-            {"type":"section","text":{"type":"mrkdwn",
-              "text":f"*Conditions met ({top.score}/{top.max_score}):*\n{cond_list}"}},
-            {"type":"context","elements":[{"type":"mrkdwn",
-              "text":f"⏱ {datetime.now().strftime('%H:%M ET')} | Not financial advice"}]},
-        ]
-        return {"text":f"{emoji} {ticker} {top.direction.upper()} @ ${top.price}",
-                "attachments":[{"color":color,"blocks":blocks}]}
 
     def _prepare(self, df_1m: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         try:

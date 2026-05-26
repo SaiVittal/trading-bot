@@ -86,7 +86,7 @@ export default function Dashboard() {
   
   const [activeToast, setActiveToast] = useState<{
     id: string;
-    platform: "telegram" | "discord";
+    platform: "telegram";
     action: "BUY" | "SELL";
     price: number;
     symbol: string;
@@ -729,7 +729,7 @@ export default function Dashboard() {
 
           </div>
 
-          {/* Structured Slack-like Alerts Column */}
+          {/* Structured Telegram Alerts Column */}
           <section className="bg-slate-900/65 border border-slate-800/80 rounded-3xl shadow-2xl flex flex-col overflow-hidden max-h-[670px] backdrop-blur-3xl lg:col-span-1">
             <div className="p-6 border-b border-slate-800 flex justify-between items-center">
               <div>
@@ -737,7 +737,7 @@ export default function Dashboard() {
                   <Bell size={16} className="text-indigo-400" />
                   Bot Alert Log
                 </h2>
-                <p className="text-xs text-slate-400">Slack & Discord trigger structures</p>
+                <p className="text-xs text-slate-400">Telegram notification stream</p>
               </div>
               <span className="badge bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono text-xs px-2.5 py-1 rounded-full">
                 {activeAlerts.length} Signals
@@ -846,18 +846,14 @@ export default function Dashboard() {
 
       </div>
 
-      {/* Telegram/Discord Animated Alerts Toasts */}
+      {/* Telegram Animated Alerts Toasts */}
       <div className="fixed bottom-6 right-6 flex flex-col gap-3 z-50 pointer-events-none">
         {activeToast && (
-          <div className={`w-[325px] p-4 bg-slate-950/95 border border-slate-800 rounded-xl shadow-2xl flex flex-col gap-2.5 transition-all duration-300 animate-slide-in pointer-events-auto ${
-            activeToast.platform === "telegram" ? "border-l-4 border-l-sky-500" : "border-l-4 border-l-indigo-500"
-          }`}>
+          <div className="w-[325px] p-4 bg-slate-950/95 border border-slate-800 rounded-xl shadow-2xl flex flex-col gap-2.5 transition-all duration-300 animate-slide-in pointer-events-auto border-l-4 border-l-sky-500">
             <div className="flex items-center gap-2">
-              <span className="text-base">{activeToast.platform === "telegram" ? "✈️" : "👾"}</span>
-              <span className={`text-xs font-extrabold tracking-wide uppercase ${
-                activeToast.platform === "telegram" ? "text-sky-400" : "text-indigo-400"
-              }`}>
-                {activeToast.platform === "telegram" ? "Telegram Alerts System" : "Discord Alerts System"}
+              <span className="text-base">✈️</span>
+              <span className="text-xs font-extrabold tracking-wide uppercase text-sky-400">
+                Telegram Alerts System
               </span>
             </div>
             <div className="text-xs text-slate-200">
@@ -866,7 +862,7 @@ export default function Dashboard() {
               </b><br />
               Crossover trigger for {activeToast.symbol} executed successfully at ${activeToast.price.toFixed(2)}.<br />
               <span className="text-[10px] text-slate-400 block mt-1 font-mono">
-                {activeToast.platform === "telegram" ? "Channel: @TradingPlatformAlerts" : "Channel: #trading-signals"}
+                Channel: @TradingPlatformAlerts
               </span>
             </div>
           </div>
