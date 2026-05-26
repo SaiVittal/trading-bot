@@ -385,9 +385,9 @@ class RealtimeCandleEngine:
                 )
                 return
 
-            # Enforce 0.3% minimum ATR so trade levels are meaningful even when
-            # the engine just started and only has seconds of candle history.
-            _atr_floor = top.price * 0.003
+            # Enforce 0.5% minimum ATR — prevents tiny 5s-bar ATR from
+            # producing $0.20 stops and T1/T2 levels that are meaningless.
+            _atr_floor = top.price * 0.005
             if vol_data["atr"] < _atr_floor:
                 vol_data = {**vol_data, "atr": round(_atr_floor, 4)}
 
@@ -432,6 +432,25 @@ class RealtimeCandleEngine:
             f"| R:R 1:{risk_data['rr']} | Conf: {top.confidence}/100 "
             f"| {now_et.strftime('%H:%M ET')}"
         )
+        trade_type = self._classify_trade_type(
+            now_et, vol_data["atr"] / top.price * 100,
+            risk_data["rr"], top.category)
+
+        # Exit price and management note — 0DTE exits at T1, all others at T2
+        _is_0dte = "0DTE" in trade_type or "Scalp" in trade_type
+        if direction == "bullish":
+            exit_price = risk_data["t1"] if _is_0dte else risk_data["t2"]
+        else:
+            exit_price = risk_data["t1"] if _is_0dte else risk_data["t2"]
+
+        _exit_notes = {
+            "0DTE Scalp (exit today)":    "Must exit by 15:30 ET — 0DTE only",
+            "Intraday (same-day exit)":   "Trail stop to entry after T1 — exit EOD",
+            "Weekly (2–5 days)":          "Hold 2–5 days — trail stop after T1 hit",
+            "Swing Trade (1–3 weeks)":    "Hold 1–3 weeks — trail stop to T1 after T2 hit",
+        }
+        exit_note = _exit_notes.get(trade_type, "Exit at T2 or trail stop")
+
         alert_payload = {
             "symbol":             symbol,
             "action":             action,
@@ -462,9 +481,9 @@ class RealtimeCandleEngine:
             "t1":                 risk_data["t1"],
             "t2":                 risk_data["t2"],
             "rr":                 risk_data["rr"],
-            "trade_type":         self._classify_trade_type(
-                                      now_et, vol_data["atr"] / top.price * 100,
-                                      risk_data["rr"], top.category),
+            "exit_price":         exit_price,
+            "exit_note":          exit_note,
+            "trade_type":         trade_type,
             "confidence":         top.confidence,
             "confidence_label":   prob_data.get("confidence_label", "N/A"),
             "upgrade_confidence": prob_data.get("confidence", 0),
@@ -480,6 +499,7 @@ class RealtimeCandleEngine:
             "sr_signals":         [self._sr_signal_to_dict(s) for s in sr_signals],
             "timestamp":          time.time(),
         }
+
 
         logger.info(f"Alert — {legacy_str}")
         logger.debug(f"Conditions met: {top.conditions_met}")
@@ -554,7 +574,13 @@ class RealtimeCandleEngine:
             return
 
         emoji      = "🟢" if sig["action"] == "BUY" else "🔴"
-        trade_type = sig.get("trade_type", "Intraday")
+        trade_type  = sig.get("trade_type", "Intraday")
+        exit_price  = sig.get("exit_price")
+        exit_note   = sig.get("exit_note", "")
+        exit_line   = (
+            f"Exit: ${exit_price:.2f}  <i>({exit_note})</i>\n"
+            if exit_price else ""
+        )
         strategies = "\n".join(
             f"  • [{sid}] {name}"
             for sid, name in zip(sig.get("strategies_fired", []),
@@ -651,6 +677,7 @@ class RealtimeCandleEngine:
             f"<b>Trade levels:</b>\n"
             f"Entry: ${sig['price']:.2f} | Stop: ${sig['stop']:.2f}\n"
             f"T1: ${sig['t1']:.2f} | T2: ${sig['t2']:.2f} | R:R 1:{sig['rr']}\n"
+            f"{exit_line}"
             f"Expected range: {rng_str}\n\n"
             f"<b>Conditions met:</b>\n{conditions}\n\n"
             f"Confidence: {sig['confidence']}/100 | Vol regime: {sig['vol_regime'].upper()}\n"
@@ -731,19 +758,22 @@ class RealtimeCandleEngine:
                         direction, t_icon = "Bullish", "📈"
                         stop = round(price - atr,       2)
                         t1   = round(price + atr * 1.5, 2)
-                        t2   = round(price + atr * 2.5, 2)
+                        t2   = round(price + atr * 4.0, 2)
                     else:
                         direction, t_icon = "Bearish", "📉"
                         stop = round(price + atr,       2)
                         t1   = round(price - atr * 1.5, 2)
-                        t2   = round(price - atr * 2.5, 2)
+                        t2   = round(price - atr * 4.0, 2)
 
                     risk_r = round(abs(price - t1) / abs(price - stop), 1) if price != stop else 0
                     ttype  = self._classify_trade_type(now_et, atr / price * 100, risk_r, "INTRADAY")
+                    _is_0dte_h = "0DTE" in ttype or "Scalp" in ttype
+                    exit_h = t1 if _is_0dte_h else t2
                     lines.append(
                         f"<b>{sym}</b>  ${price:.2f}  {t_icon} {direction}\n"
                         f"  Type: <b>{ttype}</b>\n"
-                        f"  Entry ${price:.2f} | Stop ${stop:.2f} | T1 ${t1:.2f} | T2 ${t2:.2f} | R:R 1:{risk_r}"
+                        f"  Entry ${price:.2f} | Stop ${stop:.2f} | T1 ${t1:.2f} | T2 ${t2:.2f} | R:R 1:{risk_r}\n"
+                        f"  Exit: ${exit_h:.2f}"
                     )
                 except Exception:
                     continue
@@ -809,9 +839,9 @@ class RealtimeCandleEngine:
     def _basic_risk(price: float, direction: str, atr: float) -> dict:
         atr = atr if atr > 0 else price * 0.005
         m   = 1 if direction == "bullish" else -1
-        stop, t1, t2 = (round(price - m*atr, 2),
-                        round(price + m*atr*1.5, 2),
-                        round(price + m*atr*2.5, 2))
+        stop = round(price - m * atr,       2)
+        t1   = round(price + m * atr * 1.5, 2)
+        t2   = round(price + m * atr * 4.0, 2)
         risk = abs(price - stop)
         return {"entry": round(price, 2), "stop": stop, "t1": t1, "t2": t2,
                 "rr": round(abs(price-t1)/risk, 2) if risk > 0 else 0,

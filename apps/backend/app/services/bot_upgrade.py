@@ -461,20 +461,16 @@ class RiskEngine:
     def run(self, price: float, direction: str, atr: float, price_range: dict) -> dict:
         atr = atr if atr > 0 else price * 0.005
 
+        # Use pure ATR multiples — SR/expected-range overrides caused T2 < T1.
+        # stop=1.0×ATR, T1=1.5×ATR, T2=4.0×ATR (realistic for TSLA: ~$2 ATR → T2 +$8)
         if direction == "bearish":
-            stop   = round(price + atr * 1.0, 2)
-            t1_atr = round(price - atr * 1.5, 2)
-            t2_atr = round(price - atr * 2.5, 2)
-            sr     = price_range.get("sr_target")
-            t1     = sr["high"] if sr else t1_atr
-            t2     = price_range.get("expected_low") or t2_atr
+            stop = round(price + atr * 1.0, 2)
+            t1   = round(price - atr * 1.5, 2)
+            t2   = round(price - atr * 4.0, 2)
         else:
-            stop   = round(price - atr * 1.0, 2)
-            t1_atr = round(price + atr * 1.5, 2)
-            t2_atr = round(price + atr * 2.5, 2)
-            sr     = price_range.get("sr_target")
-            t1     = sr["low"] if sr else t1_atr
-            t2     = price_range.get("expected_high") or t2_atr
+            stop = round(price - atr * 1.0, 2)
+            t1   = round(price + atr * 1.5, 2)
+            t2   = round(price + atr * 4.0, 2)
 
         risk   = abs(price - stop)
         reward = abs(price - t1)
@@ -483,8 +479,8 @@ class RiskEngine:
         return {
             "entry":  round(price, 2),
             "stop":   stop,
-            "t1":     round(float(t1), 2),
-            "t2":     round(float(t2), 2),
+            "t1":     t1,
+            "t2":     t2,
             "rr":     rr,
             "risk_$": round(risk, 2),
         }
