@@ -30,8 +30,6 @@ from app.services.strategy_engine import StrategyScanner, StrategySignal
 from app.services.opening_drive import OpeningDriveModule, OpeningDriveSignal
 from app.services.sr_strategies import SRStrategyModule, SRSignal as SRStrategySignal
 from app.services.price_fix import is_price_sane, validate_dataframe
-from app.services.vwap_strategies import VWAPStrategyModule, VWAPSignal
-from app.services.vwap_box_breakout import VWAPBoxBreakoutStrategy, VWAPBreakoutSignal
 
 logger = logging.getLogger("app.services.candle_engine")
 
@@ -94,7 +92,6 @@ CATEGORY_EMOJI = {
     "EMA": "📉", "OPENING_DRIVE": "🚀",
     "SR_BOUNCE": "🎯", "SR_BREAKOUT": "⚡", "PIVOT": "🔵",
     "ROUND_NUMBER": "🔢", "PDH_PDL": "📌",
-    "UPTREND": "📈", "DOWNTREND": "📉",
 }
 
 # Opening Drive: only 9:30–10:30 ET (first hour only)
@@ -124,8 +121,6 @@ class RealtimeCandleEngine:
         self._formatter  = AlertFormatter()
         self._od_module      = OpeningDriveModule(min_confidence=55, min_rvol=1.5, min_gap_pct=0.5)
         self._sr_module      = SRStrategyModule(min_confidence=55)
-        self._vwap_module    = VWAPStrategyModule(min_confidence=55)
-        self._s28_strategy   = VWAPBoxBreakoutStrategy()
         self.prior_closes:   Dict[str, float] = {}   # symbol → prior session close
         self.session_dates:  Dict[str, object] = {}  # symbol → last seen date
         self.prior_day_data: Dict[str, dict] = {}    # symbol → {high, low, close} of prior session
@@ -320,30 +315,8 @@ class RealtimeCandleEngine:
         except Exception as e:
             logger.warning(f"S/R scan failed for {symbol}: {e}")
 
-        vwap_signals: List[VWAPSignal] = []
-        try:
-            vwap_signals = self._vwap_module.scan(symbol, df_raw)
-            if vwap_signals:
-                logger.info(
-                    f"{symbol}: {len(vwap_signals)} VWAP signal(s) — "
-                    f"{[s.strategy_id for s in vwap_signals]}"
-                )
-        except Exception as e:
-            logger.warning(f"VWAP scan failed for {symbol}: {e}")
-
-        s28_signals: List[VWAPBreakoutSignal] = []
-        try:
-            s28_sig = self._s28_strategy.check(symbol, df_raw)
-            if s28_sig and s28_sig.confidence >= 65:
-                s28_signals = [s28_sig]
-                logger.info(
-                    f"{symbol}: S28 fired — conf:{s28_sig.confidence} quality:{s28_sig.quality}"
-                )
-        except Exception as e:
-            logger.warning(f"S28 scan failed for {symbol}: {e}")
-
         # ── Gate: need at least one signal from any module ────────
-        if not (filtered or od_signals or sr_signals or vwap_signals or s28_signals):
+        if not (filtered or od_signals or sr_signals):
             return
 
         # ── Build primary signal context ──────────────────────────
@@ -359,7 +332,7 @@ class RealtimeCandleEngine:
         else:
             # Specialty-only alert: build from best available specialty signal
             signals   = []
-            best_spec = (od_signals + s28_signals + vwap_signals + sr_signals)[0]
+            best_spec = (od_signals + sr_signals)[0]
             direction = best_spec.direction
             action    = "BUY" if direction == "bullish" else "SELL"
             bull      = 1 if direction == "bullish" else 0
@@ -480,8 +453,6 @@ class RealtimeCandleEngine:
             "mtf_targets":        mtf_targets,
             "od_signals":         [self._od_signal_to_dict(s) for s in od_signals],
             "sr_signals":         [self._sr_signal_to_dict(s) for s in sr_signals],
-            "vwap_signals":       [self._vwap_signal_to_dict(s) for s in vwap_signals],
-            "s28_signals":        [self._s28_signal_to_dict(s) for s in s28_signals],
             "timestamp":          time.time(),
         }
 
@@ -737,49 +708,6 @@ class RealtimeCandleEngine:
                 + "\n\n".join(sr_lines)
             )
 
-        # ── VWAP strategies section ───────────────────────────────
-        _CAT_ICON = {"REVERSAL": "🔄", "UPTREND": "📈", "DOWNTREND": "📉"}
-        vwap_section = ""
-        vwap_list = sig.get("vwap_signals", [])
-        if vwap_list:
-            vwap_lines = []
-            for vs in vwap_list[:3]:
-                dir_em   = "🟢" if vs["direction"] == "bullish" else "🔴"
-                prem_v   = " ⭐ PREMIUM" if vs.get("premium_setup") else ""
-                cat_icon = _CAT_ICON.get(vs.get("category", ""), "📊")
-                bias_str = vs.get("session_bias", "").upper()
-                vwap_lines.append(
-                    f"{dir_em} {cat_icon} *[{vs['strategy_id']}] {vs['strategy_name']}*{prem_v}\n"
-                    f"  VWAP: ${vs['vwap']} | Bias: {bias_str} | {vs['vwap_touches_today']} touches\n"
-                    f"  Entry: ${vs['entry']} | Stop: ${vs['stop']}\n"
-                    f"  T1: ${vs['t1']} | T2: ${vs['t2']} | R:R 1:{vs['rr']}\n"
-                    f"  Conf: {vs['confidence']}/100  ({vs['score']}/{vs['max_score']} conditions)"
-                )
-            vwap_section = (
-                "\n\n💧 *VWAP Strategy Signals (V-R1–V-D3):*\n"
-                "─────────────────────────────\n"
-                + "\n\n".join(vwap_lines)
-            )
-
-        # ── S28 VWAP Box Breakout section ─────────────────────────
-        s28_section = ""
-        s28_list = sig.get("s28_signals", [])
-        if s28_list:
-            s28     = s28_list[0]
-            dir_em  = "🟢" if s28["direction"] == "bullish" else "🔴"
-            prem_28 = "\n  ⭐ PREMIUM SETUP — dual breakout confirmed!" if s28.get("premium_setup") else ""
-            fr_28   = "\n  🔁 FIRST VWAP RECLAIM of session" if s28.get("first_reclaim") else ""
-            s28_section = (
-                f"\n\n📦 *S28 VWAP Box Breakout:*{prem_28}{fr_28}\n"
-                f"─────────────────────────────\n"
-                f"{dir_em} *{s28['direction'].upper()}* | Conf: {s28['confidence']}/100 ({s28['quality']})\n"
-                f"  Box: ${s28['box_low']} – ${s28['box_high']} ({s28['box_bars']} bars)\n"
-                f"  VWAP: ${s28['vwap']} | EMA9: ${s28['ema9']} | Vol: {s28['rel_vol']:.1f}× avg\n"
-                f"  Entry: ${s28['entry']} | Stop: ${s28['stop']}\n"
-                f"  T1: ${s28['t1']} | T2: ${s28['t2']} | R:R 1:{s28['rr']}\n"
-                f"  Conditions: {s28['score']}/{s28['max_score']}"
-            )
-
         text = (
             f"{emoji} *{symbol} {sig['action']} ALERT* — {sig['session_time']}\n"
             f"─────────────────────────────\n"
@@ -797,9 +725,7 @@ class RealtimeCandleEngine:
             f"_TF  | Trend | ↑ Higher High  ↓ Lower Low_\n"
             f"{mtf_section}"
             f"{od_section}"
-            f"{sr_section}"
-            f"{vwap_section}"
-            f"{s28_section}\n\n"
+            f"{sr_section}\n\n"
             f"🧠 *AI Insight:* _{sig['ai_insight']}_\n\n"
             f"⚠ _Educational only — not financial advice_"
         )
@@ -911,62 +837,6 @@ class RealtimeCandleEngine:
             "sr_level_strength":  sig.sr_level_strength,
             "sr_level_touches":   sig.sr_level_touches,
             "premium_setup":      sig.premium_setup,
-        }
-
-    @staticmethod
-    def _vwap_signal_to_dict(sig: VWAPSignal) -> dict:
-        return {
-            "strategy_id":        sig.strategy_id,
-            "strategy_name":      sig.strategy_name,
-            "category":           sig.category,
-            "sub_type":           sig.sub_type,
-            "direction":          sig.direction,
-            "price":              sig.price,
-            "vwap":               sig.vwap,
-            "entry":              sig.entry,
-            "stop":               sig.stop,
-            "t1":                 sig.t1,
-            "t2":                 sig.t2,
-            "rr":                 sig.rr,
-            "confidence":         sig.confidence,
-            "conditions_met":     sig.conditions_met,
-            "score":              sig.score,
-            "max_score":          sig.max_score,
-            "vwap_distance_pct":  sig.vwap_distance_pct,
-            "session_bias":       sig.session_bias,
-            "vwap_touches_today": sig.vwap_touches_today,
-            "premium_setup":      sig.premium_setup,
-        }
-
-    @staticmethod
-    def _s28_signal_to_dict(sig: VWAPBreakoutSignal) -> dict:
-        return {
-            "strategy_id":    sig.strategy_id,
-            "strategy_name":  sig.strategy_name,
-            "direction":      sig.direction,
-            "price":          sig.price,
-            "entry":          sig.entry,
-            "stop":           sig.stop,
-            "t1":             sig.t1,
-            "t2":             sig.t2,
-            "rr":             sig.rr,
-            "confidence":     sig.confidence,
-            "quality":        sig.quality,
-            "conditions_met": sig.conditions_met,
-            "score":          sig.score,
-            "max_score":      sig.max_score,
-            "vwap":           sig.vwap,
-            "ema9":           sig.ema9,
-            "ema20":          sig.ema20,
-            "ema200":         sig.ema200,
-            "volume":         sig.volume,
-            "rel_vol":        sig.rel_vol,
-            "box_high":       sig.box_high,
-            "box_low":        sig.box_low,
-            "box_bars":       sig.box_bars,
-            "atr":            sig.atr,
-            "first_reclaim":  sig.first_reclaim,
-            "premium_setup":  sig.premium_setup,
         }
 
     # ──────────────────────────────────────────────────────────────
