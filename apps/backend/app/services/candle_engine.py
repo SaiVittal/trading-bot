@@ -4,7 +4,7 @@ import logging
 import math
 import time
 from collections import deque
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
@@ -94,8 +94,10 @@ CATEGORY_EMOJI = {
     "ROUND_NUMBER": "🔢", "PDH_PDL": "📌",
 }
 
-# Opening Drive: only 9:30–10:30 ET (first hour only)
-OPENING_DRIVE_WINDOW = (dtime(9, 30), dtime(10, 30))
+# Opening Drive: 8:30–10:30 ET (pre-market momentum + first trading hour)
+OPENING_DRIVE_WINDOW   = (dtime(8, 30), dtime(10, 30))
+# Hourly summary: every top-of-hour 9:30–15:30 ET
+HOURLY_ALERT_SESSION   = (dtime(9, 30), dtime(15, 30))
 
 
 class RealtimeCandleEngine:
@@ -149,6 +151,7 @@ class RealtimeCandleEngine:
             logger.error("Redis client not initialized. Cannot run Candle Engine.")
             return
 
+        hourly_task = asyncio.create_task(self._hourly_alert_loop())
         async with client.pubsub() as pubsub:
             await pubsub.subscribe(REDIS_TICK_CHANNEL)
             logger.info(f"Subscribed to tick channel: {REDIS_TICK_CHANNEL}")
@@ -161,6 +164,8 @@ class RealtimeCandleEngine:
                 logger.info("Candle Engine cancelled — shutting down.")
             except Exception as e:
                 logger.error(f"Candle Engine error: {e}", exc_info=True)
+            finally:
+                hourly_task.cancel()
 
     # ──────────────────────────────────────────────────────────────
     #  Tick → Candle accumulation
@@ -374,6 +379,12 @@ class RealtimeCandleEngine:
                 )
                 return
 
+            # Enforce 0.3% minimum ATR so trade levels are meaningful even when
+            # the engine just started and only has seconds of candle history.
+            _atr_floor = top.price * 0.003
+            if vol_data["atr"] < _atr_floor:
+                vol_data = {**vol_data, "atr": round(_atr_floor, 4)}
+
             risk_data    = self._risk.run(top.price, direction, vol_data["atr"], range_data)
             base_insight = self._insight.generate(
                 symbol, prob_data, mtf_data, vol_data, volume_data, candle_data, range_data
@@ -443,6 +454,9 @@ class RealtimeCandleEngine:
             "t1":                 risk_data["t1"],
             "t2":                 risk_data["t2"],
             "rr":                 risk_data["rr"],
+            "trade_type":         self._classify_trade_type(
+                                      now_et, vol_data["atr"] / top.price * 100,
+                                      risk_data["rr"], top.category),
             "confidence":         top.confidence,
             "confidence_label":   prob_data.get("confidence_label", "N/A"),
             "upgrade_confidence": prob_data.get("confidence", 0),
@@ -531,7 +545,8 @@ class RealtimeCandleEngine:
             logger.info(f"Telegram cooldown active for {symbol}.")
             return
 
-        emoji     = "🟢" if sig["action"] == "BUY" else "🔴"
+        emoji      = "🟢" if sig["action"] == "BUY" else "🔴"
+        trade_type = sig.get("trade_type", "Intraday")
         strategies = "\n".join(
             f"  • [{sid}] {name}"
             for sid, name in zip(sig.get("strategies_fired", []),
@@ -552,20 +567,20 @@ class RealtimeCandleEngine:
             ll    = row.get("proj_ll")
             rsi   = row.get("rsi")
             if hh is None or ll is None:
-                mtf_lines.append(f"`{tf:<3}` {ticon}  —  insufficient data")
+                mtf_lines.append(f"<code>{tf:<3}</code> {ticon}  —  insufficient data")
             elif tf == "1d":
                 mtf_lines.append(
-                    f"`{tf:<3}` {ticon}  Hi ${row['swing_high']:.2f}  Lo ${row['swing_low']:.2f}"
+                    f"<code>{tf:<3}</code> {ticon}  Hi ${row['swing_high']:.2f}  Lo ${row['swing_low']:.2f}"
                     f"  →  ↑${hh:.2f}  ↓${ll:.2f}"
                 )
             else:
                 rsi_str = f"  RSI:{rsi:.0f}" if rsi is not None else ""
                 mtf_lines.append(
-                    f"`{tf:<3}` {ticon}  ↑${hh:.2f}  ↓${ll:.2f}{rsi_str}"
+                    f"<code>{tf:<3}</code> {ticon}  ↑${hh:.2f}  ↓${ll:.2f}{rsi_str}"
                 )
         mtf_section = "\n".join(mtf_lines) if mtf_lines else "  N/A"
 
-        # Opening Drive alert section
+        # ── Opening Drive alert section ───────────────────────────
         od_section = ""
         od_list    = sig.get("od_signals", [])
         if od_list:
@@ -576,73 +591,189 @@ class RealtimeCandleEngine:
                 rvol  = od.get("rvol", 0)
                 rq    = od.get("rvol_quality", "").upper()
                 ph    = od.get("pm_high")
-                pmh_s = f" | PM High ${ph}" if ph else ""
+                pmh_s = f" | PM High ${ph:.2f}" if ph else ""
                 od_lines.append(
-                    f"🚀 *[{od['strategy_id']}] {od['strategy_name']}*{star}\n"
+                    f"🚀 <b>[{od['strategy_id']}] {od['strategy_name']}</b>{star}\n"
                     f"   Gap: {gap:+.1f}% | RVOL: {rvol:.1f}× ({rq}){pmh_s}\n"
                     f"   Entry: ${od['entry']:.2f} | Stop: ${od['stop']:.2f} | "
                     f"T1: ${od['t1']:.2f} | T2: ${od['t2']:.2f} | R:R 1:{od['rr']}\n"
                     f"   Conf: {od['confidence']}/100 | {od['score']}/{od['max_score']} conditions"
                 )
-            od_section = "\n\n📊 *Opening Drive Alerts:*\n" + "\n\n".join(od_lines)
+            od_section = "\n\n📊 <b>Opening Drive Alerts:</b>\n" + "\n\n".join(od_lines)
 
         # ── S/R levels alert section ──────────────────────────────
         sr_section = ""
         sr_list = sig.get("sr_signals", [])
+        main_dir = sig.get("direction", "bullish")
+        conflict_srs = [sr for sr in sr_list if sr["direction"] != main_dir]
         if sr_list:
             sr_lines = []
             for sr in sr_list:
-                dir_em = "🟢" if sr["direction"] == "bullish" else "🔴"
-                prem   = " ⭐ PREMIUM" if sr.get("premium_setup") else ""
-                ltype  = sr.get("sr_level_type", "")
-                ltouch = sr.get("sr_level_touches", 0)
-                lstr   = sr.get("sr_level_strength", 0)
+                dir_em  = "🟢" if sr["direction"] == "bullish" else "🔴"
+                prem    = " ⭐ PREMIUM" if sr.get("premium_setup") else ""
+                ltype   = sr.get("sr_level_type", "")
+                ltouch  = sr.get("sr_level_touches", 0)
+                lstr    = sr.get("sr_level_strength", 0)
+                conflict_tag = " ⚠ CONFLICTING" if sr["direction"] != main_dir else ""
                 sr_lines.append(
-                    f"{dir_em} *[{sr['strategy_id']}] {sr['strategy_name']}*{prem}\n"
+                    f"{dir_em} <b>[{sr['strategy_id']}] {sr['strategy_name']}</b>{prem}{conflict_tag}\n"
                     f"  Level: ${sr['sr_level_price']:.2f}  ({ltype}  ·  {ltouch} touches  ·  strength {lstr})\n"
                     f"  Entry: ${sr['entry']:.2f}  Stop: ${sr['stop']:.2f}\n"
                     f"  T1: ${sr['t1']:.2f}  T2: ${sr['t2']:.2f}  R:R 1:{sr['rr']}\n"
                     f"  Conf: {sr['confidence']}/100  ({sr['score']}/{sr['max_score']} conditions)"
                 )
+            conflict_note = (
+                f"\n⚠ <i>{len(conflict_srs)} S/R signal(s) oppose this alert direction — trade with caution</i>"
+                if conflict_srs else ""
+            )
             sr_section = (
-                "\n\n📍 *S/R Strategy Signals (S20–S27):*\n"
+                "\n\n📍 <b>S/R Strategy Signals (S20–S27):</b>\n"
                 "─────────────────────────────\n"
                 + "\n\n".join(sr_lines)
+                + conflict_note
             )
 
         text = (
-            f"{emoji} *{symbol} {sig['action']} ALERT* — {sig['session_time']}\n"
+            f"{emoji} <b>{symbol} {sig['action']} ALERT</b> — {sig['session_time']}\n"
             f"─────────────────────────────\n"
-            f"*Top Strategy:* [{sig['top_strategy']}] {sig['top_strategy_name']}\n"
-            f"*Consensus:* {sig['consensus_bull']} Bull / {sig['consensus_bear']} Bear\n\n"
-            f"*Fired strategies:*\n{strategies}\n\n"
-            f"*Trade levels:*\n"
+            f"<b>Top Strategy:</b> [{sig['top_strategy']}] {sig['top_strategy_name']}\n"
+            f"<b>Consensus:</b> {sig['consensus_bull']} Bull / {sig['consensus_bear']} Bear\n"
+            f"<b>Trade Type:</b> {trade_type}\n\n"
+            f"<b>Fired strategies:</b>\n{strategies}\n\n"
+            f"<b>Trade levels:</b>\n"
             f"Entry: ${sig['price']:.2f} | Stop: ${sig['stop']:.2f}\n"
             f"T1: ${sig['t1']:.2f} | T2: ${sig['t2']:.2f} | R:R 1:{sig['rr']}\n"
             f"Expected range: {rng_str}\n\n"
-            f"*Conditions met:*\n{conditions}\n\n"
+            f"<b>Conditions met:</b>\n{conditions}\n\n"
             f"Confidence: {sig['confidence']}/100 | Vol regime: {sig['vol_regime'].upper()}\n"
             f"Patterns: {patterns}\n\n"
-            f"📊 *Multi-Timeframe Price Targets:*\n"
-            f"_TF  | Trend | ↑ Higher High  ↓ Lower Low_\n"
+            f"📊 <b>Multi-Timeframe Price Targets:</b>\n"
+            f"<i>TF  | Trend | ↑ Higher High  ↓ Lower Low</i>\n"
             f"{mtf_section}"
             f"{od_section}"
             f"{sr_section}\n\n"
-            f"🧠 *AI Insight:* _{sig['ai_insight']}_\n\n"
-            f"⚠ _Educational only — not financial advice_"
+            f"🧠 <b>AI Insight:</b> <i>{sig['ai_insight']}</i>\n\n"
+            f"⚠ <i>Educational only — not financial advice</i>"
         )
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         try:
             async with httpx.AsyncClient() as client:
                 await client.post(
                     url,
-                    json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+                    json={"chat_id": chat_id, "text": text,
+                          "parse_mode": "HTML", "disable_web_page_preview": True},
                     timeout=5.0,
                 )
             self.last_telegram_alert_time[symbol] = now
             logger.info(f"Telegram alert dispatched for {symbol}.")
         except Exception as e:
             logger.error(f"Telegram dispatch error for {symbol}: {e}")
+
+    # ──────────────────────────────────────────────────────────────
+    #  Trade-type classifier
+    # ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _classify_trade_type(now_et: datetime, atr_pct: float,
+                             rr: float, category: str) -> str:
+        """Label the alert as 0DTE Scalp / Intraday / Weekly / Swing based on
+        time of day, volatility, R:R, and strategy category."""
+        t = now_et.time()
+        # Late-day or tight R:R → 0DTE only, must close before market end
+        if t >= dtime(14, 0) or rr < 1.5:
+            return "0DTE Scalp (exit today)"
+        # Strong trend strategy + good ATR + early session → swing candidate
+        if category in ("TREND", "EMA") and rr >= 2.5 and atr_pct >= 0.4:
+            return "Swing Trade (1–3 weeks)"
+        # Good R:R + morning window → multi-day hold
+        if rr >= 2.0 and t < dtime(11, 30):
+            return "Weekly (2–5 days)"
+        return "Intraday (same-day exit)"
+
+    # ──────────────────────────────────────────────────────────────
+    #  Hourly market-update loop
+    # ──────────────────────────────────────────────────────────────
+
+    async def _hourly_alert_loop(self) -> None:
+        """Sleep until the next top-of-hour ET, then dispatch a brief
+        intraday summary for every active symbol.  Repeats indefinitely."""
+        while True:
+            now_et = datetime.now(ET)
+            nxt    = (now_et + timedelta(hours=1)).replace(
+                         minute=0, second=2, microsecond=0)
+            await asyncio.sleep(max(1, (nxt - datetime.now(ET)).total_seconds()))
+
+            now_et = datetime.now(ET)
+            h_start, h_end = HOURLY_ALERT_SESSION
+            if not (h_start <= now_et.time() < h_end):
+                continue
+
+            lines: List[str] = []
+            for sym in sorted(self.closed_candles_history):
+                df = self._build_dataframe(sym)
+                if df is None:
+                    continue
+                try:
+                    price = float(df["Close"].iloc[-1])
+                    ema9  = float(df["Close"].ewm(span=9, adjust=False).mean().iloc[-1])
+                    atr   = float((df["High"] - df["Low"]).tail(14).mean())
+                    atr   = max(atr, price * 0.003)
+
+                    if price >= ema9:
+                        direction, t_icon = "Bullish", "📈"
+                        stop = round(price - atr,       2)
+                        t1   = round(price + atr * 1.5, 2)
+                        t2   = round(price + atr * 2.5, 2)
+                    else:
+                        direction, t_icon = "Bearish", "📉"
+                        stop = round(price + atr,       2)
+                        t1   = round(price - atr * 1.5, 2)
+                        t2   = round(price - atr * 2.5, 2)
+
+                    risk_r = round(abs(price - t1) / abs(price - stop), 1) if price != stop else 0
+                    ttype  = self._classify_trade_type(now_et, atr / price * 100, risk_r, "INTRADAY")
+                    lines.append(
+                        f"<b>{sym}</b>  ${price:.2f}  {t_icon} {direction}\n"
+                        f"  Type: <b>{ttype}</b>\n"
+                        f"  Entry ${price:.2f} | Stop ${stop:.2f} | T1 ${t1:.2f} | T2 ${t2:.2f} | R:R 1:{risk_r}"
+                    )
+                except Exception:
+                    continue
+
+            if lines:
+                await self._dispatch_hourly_telegram(now_et, lines)
+
+    async def _dispatch_hourly_telegram(self, now_et: datetime,
+                                        lines: List[str]) -> None:
+        """Send the hourly summary message to Telegram."""
+        token   = settings.TELEGRAM_BOT_TOKEN or ""
+        chat_id = settings.TELEGRAM_CHAT_ID   or ""
+        if not token or not chat_id or "your_telegram_bot_token" in token:
+            return
+
+        body = "\n\n".join(lines)
+        text = (
+            f"📊 <b>HOURLY UPDATE — {now_et.strftime('%H:%M ET')}</b>\n"
+            f"─────────────────────────────\n"
+            f"{body}\n\n"
+            f"─────────────────────────────\n"
+            f"⚠ <i>Intraday market update — not financial advice</i>"
+        )
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    url,
+                    json={"chat_id": chat_id, "text": text,
+                          "parse_mode": "HTML", "disable_web_page_preview": True},
+                    timeout=5.0,
+                )
+            logger.info(
+                f"Hourly update dispatched — {len(lines)} symbol(s) at "
+                f"{now_et.strftime('%H:%M ET')}"
+            )
+        except Exception as e:
+            logger.error(f"Hourly Telegram dispatch error: {e}")
 
     # ──────────────────────────────────────────────────────────────
     #  Fallback helpers

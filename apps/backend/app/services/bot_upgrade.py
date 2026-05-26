@@ -517,7 +517,9 @@ class InsightGenerator:
 
         if candles["patterns"]:
             pats = ", ".join(p.replace("_", " ") for p in candles["patterns"][:2])
-            parts.append(f"{pats} candle pattern")
+            # Avoid "hammer candle pattern" → "Hammer candle candle pattern"
+            suffix = " pattern" if any("candle" in p for p in candles["patterns"][:2]) else " candle pattern"
+            parts.append(f"{pats}{suffix}")
 
         if volume["spike"]:
             parts.append(f"volume spike at {volume['rel_vol']}× average")
