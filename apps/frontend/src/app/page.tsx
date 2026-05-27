@@ -136,7 +136,7 @@ export default function Dashboard() {
         try {
           const parsed = JSON.parse(savedWatchlist);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            setWatchlist(parsed);
+            Promise.resolve().then(() => setWatchlist(parsed));
           }
         } catch (e) {
           console.error("Failed to parse watchlist from localStorage:", e);
@@ -258,7 +258,7 @@ export default function Dashboard() {
         setTelegramAlertsEnabled(!nextState);
         logSystem("Failed to toggle Telegram alerts.", "error");
       }
-    } catch (e) {
+    } catch {
       setTelegramAlertsEnabled(!nextState);
       logSystem("Failed to toggle Telegram alerts.", "error");
     }
@@ -605,7 +605,6 @@ export default function Dashboard() {
       if (ws) ws.close();
       clearTimeout(reconnectTimeout);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   // HTML5 Canvas chart renderer
