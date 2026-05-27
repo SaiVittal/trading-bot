@@ -107,6 +107,7 @@ class RealtimeCandleEngine:
         self.candle_start_times:     Dict[str, float] = {}
         self.closed_candles_history: Dict[str, deque] = {}
         self.last_telegram_alert_time: Dict[str, float] = {}
+        self.last_global_alert_time: Dict[str, float] = {}
 
         # Strategy scanner — 15 strategies; we apply per-strategy thresholds ourselves
         self._scanner = StrategyScanner(min_confidence=25)
@@ -181,6 +182,7 @@ class RealtimeCandleEngine:
             self.candle_start_times.pop(sym, None)
             self.closed_candles_history.pop(sym, None)
             self.last_telegram_alert_time.pop(sym, None)
+            self.last_global_alert_time.pop(sym, None)
             self.prior_closes.pop(sym, None)
             self.session_dates.pop(sym, None)
             self.prior_day_data.pop(sym, None)
@@ -370,6 +372,17 @@ class RealtimeCandleEngine:
             )
             return
 
+        # ── Global alert cooldown ────────────────────────────────
+        now_sec = time.time()
+        last_time = self.last_global_alert_time.get(symbol, 0.0)
+        if now_sec - last_time < settings.TELEGRAM_ALERT_COOLDOWN:
+            logger.info(
+                f"{symbol}: global alert cooldown active "
+                f"({int(now_sec - last_time)}s elapsed < {settings.TELEGRAM_ALERT_COOLDOWN}s). "
+                f"Suppressing rapid consensus alert to prevent thrashing/noise."
+            )
+            return
+
         logger.info(
             f"{symbol}: {len(signals)} strategy signal(s) fired "
             f"({bull} bull / {bear} bear) → consensus {direction.upper()} "
@@ -522,6 +535,9 @@ class RealtimeCandleEngine:
         logger.info(f"Alert — {legacy_str}")
         logger.debug(f"Conditions met: {top.conditions_met}")
 
+        # Update global alert time to prevent rapid whipsaws/thrashing
+        self.last_global_alert_time[symbol] = time.time()
+
         if redis_client.client:
             await redis_client.client.publish(
                 REDIS_ALERT_CHANNEL, json.dumps(alert_payload)
@@ -579,6 +595,16 @@ class RealtimeCandleEngine:
     # ──────────────────────────────────────────────────────────────
 
     async def _dispatch_telegram(self, sig: Dict) -> None:
+        # Check if Telegram alerts are dynamically disabled via Redis toggle
+        if redis_client.client:
+            try:
+                status_val = await redis_client.client.get("telegram_alerts_enabled")
+                if status_val == b"false":
+                    logger.info("Telegram alerts are dynamically disabled via Redis toggle. Skipping dispatch.")
+                    return
+            except Exception as e:
+                logger.warning(f"Failed to check telegram_alerts_enabled in Redis: {e}")
+
         token   = settings.TELEGRAM_BOT_TOKEN or ""
         chat_id = settings.TELEGRAM_CHAT_ID   or ""
         if not token or not chat_id or "your_telegram_bot_token" in token:

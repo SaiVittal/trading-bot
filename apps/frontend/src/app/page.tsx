@@ -103,6 +103,7 @@ export default function Dashboard() {
   );
 
   const [telemetry, setTelemetry] = useState<LogLine[]>([]);
+  const [telegramAlertsEnabled, setTelegramAlertsEnabled] = useState<boolean>(true);
 
   const [activeToast, setActiveToast] = useState<{
     id: string;
@@ -128,6 +129,18 @@ export default function Dashboard() {
       const savedToken = localStorage.getItem("auth_token");
       if (savedToken) {
         Promise.resolve().then(() => setToken(savedToken));
+      }
+      
+      const savedWatchlist = localStorage.getItem("watchlist");
+      if (savedWatchlist) {
+        try {
+          const parsed = JSON.parse(savedWatchlist);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setWatchlist(parsed);
+          }
+        } catch (e) {
+          console.error("Failed to parse watchlist from localStorage:", e);
+        }
       }
     }
   }, []);
@@ -200,6 +213,56 @@ export default function Dashboard() {
 
     return () => clearInterval(interval);
   }, [token]);
+
+  // Load initial Telegram alert status
+  useEffect(() => {
+    if (!token) return;
+    const fetchTelegramStatus = async () => {
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/v1/alerts/telegram/status`, {
+          headers: {
+            "Authorization": `Bearer ${token}`
+          }
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setTelegramAlertsEnabled(data.enabled);
+        }
+      } catch (e) {
+        console.error("Failed to fetch telegram status", e);
+      }
+    };
+    fetchTelegramStatus();
+  }, [token]);
+
+  const handleTelegramToggle = async () => {
+    if (!token) return;
+    const nextState = !telegramAlertsEnabled;
+    setTelegramAlertsEnabled(nextState);
+
+    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/v1/alerts/telegram/toggle`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ enabled: nextState })
+      });
+      if (response.ok) {
+        logSystem(`Telegram alerts successfully ${nextState ? "enabled" : "disabled"}.`, "system");
+      } else {
+        // Rollback state if api fails
+        setTelegramAlertsEnabled(!nextState);
+        logSystem("Failed to toggle Telegram alerts.", "error");
+      }
+    } catch (e) {
+      setTelegramAlertsEnabled(!nextState);
+      logSystem("Failed to toggle Telegram alerts.", "error");
+    }
+  };
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -355,7 +418,11 @@ export default function Dashboard() {
 
     // 1. Add to local watchlist state if missing
     if (!watchlist.includes(symbol)) {
-      setWatchlist(prev => [...prev, symbol]);
+      const updated = [...watchlist, symbol];
+      setWatchlist(updated);
+      if (typeof window !== "undefined") {
+        localStorage.setItem("watchlist", JSON.stringify(updated));
+      }
     }
 
     // 2. Switch main view focus to searched asset
@@ -377,6 +444,9 @@ export default function Dashboard() {
 
     const updated = watchlist.filter(s => s !== sym);
     setWatchlist(updated);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("watchlist", JSON.stringify(updated));
+    }
 
     if (selectedSymbol === sym) {
       setSelectedSymbol(updated[0] || "TSLA");
@@ -503,6 +573,9 @@ export default function Dashboard() {
           } else if (channel === "watchlist:sync") {
             const symbols = data as string[];
             setWatchlist(symbols);
+            if (typeof window !== "undefined") {
+              localStorage.setItem("watchlist", JSON.stringify(symbols));
+            }
             logSystem(`Synced persistent watchlist from backend: ${symbols.join(", ")}`, "system");
           }
         } catch (e) {
@@ -1336,7 +1409,9 @@ export default function Dashboard() {
             <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Session VWAP Floor</span>
             <span className="text-lg font-mono font-semibold text-violet-400 mt-1 flex items-center gap-2">
               <BarChart3 size={14} className="text-violet-400" />
-              ${activeAlerts.length > 0 && activeAlerts[0]?.vwap != null ? Number(activeAlerts[0].vwap).toFixed(2) : (currentPrice * 0.998).toFixed(2)}
+              ${activeAlerts.length > 0 && activeAlerts[0]?.vwap != null
+                ? Number(activeAlerts[0].vwap).toFixed(2)
+                : ((currentPrice > 0 ? currentPrice : (watchlistPrices[selectedSymbol] || 100.0)) * 0.998).toFixed(2)}
             </span>
           </div>
 
@@ -1501,9 +1576,21 @@ export default function Dashboard() {
                 </h2>
                 <p className="text-xs text-slate-400">Telegram notification stream</p>
               </div>
-              <span className="badge bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono text-xs px-2.5 py-1 rounded-full">
-                {activeAlerts.length} Signals
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleTelegramToggle}
+                  className={`px-2.5 py-1 rounded-full text-[9px] font-extrabold tracking-wider border cursor-pointer transition-all duration-300 shadow-md ${
+                    telegramAlertsEnabled
+                      ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20 shadow-emerald-500/5"
+                      : "bg-rose-500/10 text-rose-400 border-rose-500/20 hover:bg-rose-500/20 shadow-rose-500/5"
+                  }`}
+                >
+                  {telegramAlertsEnabled ? "🟢 TELEGRAM ON" : "🔴 TELEGRAM OFF"}
+                </button>
+                <span className="badge bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono text-xs px-2.5 py-1 rounded-full">
+                  {activeAlerts.length} Signals
+                </span>
+              </div>
             </div>
 
             {/* Signal Feed */}

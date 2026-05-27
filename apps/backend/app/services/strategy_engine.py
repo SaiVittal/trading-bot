@@ -1509,8 +1509,9 @@ class StrategyScanner:
     def _prepare(self, df_1m: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         try:
             if timeframe == "1m":
-                return df_1m
-            rule = {"5m":"5min","10m":"10min","15m":"15min","1h":"1h"}.get(timeframe,"5min")
+                rule = "1min"
+            else:
+                rule = {"5m":"5min","10m":"10min","15m":"15min","1h":"1h"}.get(timeframe,"5min")
             agg  = {c: ("first" if c=="Open" else "max" if c=="High"
                         else "min" if c=="Low" else "last" if c=="Close"
                         else "sum")
