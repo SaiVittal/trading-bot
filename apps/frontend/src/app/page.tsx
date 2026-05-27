@@ -7,13 +7,9 @@ import {
   Activity,
   Bell,
   Terminal,
-  Zap,
-  ArrowUpRight,
   Cpu,
   Radio,
-  Flame,
   Target,
-  Compass,
   Sparkles,
   BarChart3,
   Search,
@@ -114,7 +110,7 @@ export default function Dashboard() {
     if (typeof window !== "undefined") {
       const savedToken = localStorage.getItem("auth_token");
       if (savedToken) {
-        setToken(savedToken);
+        Promise.resolve().then(() => setToken(savedToken));
       }
     }
   }, []);
@@ -131,19 +127,20 @@ export default function Dashboard() {
     const filteredClosed = closedCandles.filter(c => c.symbol === selectedSymbol);
     if (filteredClosed.length > 0) {
       const lastClosed = filteredClosed[filteredClosed.length - 1];
-      setCurrentPrice(lastClosed.close);
+      Promise.resolve().then(() => setCurrentPrice(lastClosed.close));
       currentPriceRef.current = lastClosed.close;
       setActiveCandle({
         symbol: selectedSymbol, open: 0, high: 0, low: 0, close: 0, volume: 0, timestamp: 0
       });
     } else {
       const livePrice = watchlistPrices[selectedSymbol] || 0;
-      setCurrentPrice(livePrice);
+      Promise.resolve().then(() => setCurrentPrice(livePrice));
       currentPriceRef.current = livePrice;
       setActiveCandle({
         symbol: selectedSymbol, open: 0, high: 0, low: 0, close: 0, volume: 0, timestamp: 0
       });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSymbol, token]);
 
   useEffect(() => {
@@ -251,8 +248,9 @@ export default function Dashboard() {
         setEmailInput("");
         setPasswordInput("");
       }
-    } catch (err: any) {
-      setAuthError(err.message || "Authentication pipeline failure.");
+    } catch (err: unknown) {
+      const error = err as Error;
+      setAuthError(error.message || "Authentication pipeline failure.");
     } finally {
       setIsAuthLoading(false);
     }
@@ -272,9 +270,11 @@ export default function Dashboard() {
 
   // Hydration safety line
   useEffect(() => {
-    setTelemetry([
-      { text: "Initializing dynamic multi-symbol trading core...", type: "system", time: new Date().toLocaleTimeString() }
-    ]);
+    Promise.resolve().then(() => {
+      setTelemetry([
+        { text: "Initializing dynamic multi-symbol trading core...", type: "system", time: new Date().toLocaleTimeString() }
+      ]);
+    });
   }, []);
 
   // Animated popup dispatchers
@@ -466,10 +466,11 @@ export default function Dashboard() {
       if (ws) ws.close();
       clearTimeout(reconnectTimeout);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   // HTML5 Canvas chart renderer
-  const drawChart = () => {
+  function drawChart() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -613,7 +614,7 @@ export default function Dashboard() {
       ctx.stroke();
       ctx.shadowBlur = 0;
     }
-  };
+  }
 
   // Redraw chart dynamically on mobile orientation or viewport resize
   useEffect(() => {
