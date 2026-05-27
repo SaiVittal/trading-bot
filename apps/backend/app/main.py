@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import sentry_sdk
-from sentry_sdk.integrations.fastapi import FastAPIIntegration
+from sentry_sdk.integrations.fastapi import FastApiIntegration
 
 from app.core.config import settings
 from app.core.redis_client import redis_client
@@ -19,7 +19,7 @@ if settings.SENTRY_DSN:
     sentry_sdk.init(
         dsn=settings.SENTRY_DSN,
         environment=settings.ENV,
-        integrations=[FastAPIIntegration()],
+        integrations=[FastApiIntegration()],
         traces_sample_rate=0.1,  # Profile 10% of transaction paths
         profiles_sample_rate=0.1,
     )
