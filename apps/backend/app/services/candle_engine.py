@@ -37,6 +37,7 @@ logger = logging.getLogger("app.services.candle_engine")
 REDIS_TICK_CHANNEL   = "market:ticks"
 REDIS_CANDLE_CHANNEL = "market:candles"
 REDIS_ALERT_CHANNEL  = "signals:alerts"
+REDIS_CONTROL_CHANNEL = "market:control"
 
 # ── Candle accumulation ────────────────────────────────────────
 CANDLE_WINDOW_SECS  = 5
@@ -153,19 +154,36 @@ class RealtimeCandleEngine:
 
         hourly_task = asyncio.create_task(self._hourly_alert_loop())
         async with client.pubsub() as pubsub:
-            await pubsub.subscribe(REDIS_TICK_CHANNEL)
-            logger.info(f"Subscribed to tick channel: {REDIS_TICK_CHANNEL}")
+            await pubsub.subscribe(REDIS_TICK_CHANNEL, REDIS_CONTROL_CHANNEL)
+            logger.info(f"Subscribed to channels: {[REDIS_TICK_CHANNEL, REDIS_CONTROL_CHANNEL]}")
             try:
                 async for message in pubsub.listen():
                     if message["type"] != "message":
                         continue
-                    await self.process_tick(json.loads(message["data"]))
+                    channel = message["channel"]
+                    if channel == REDIS_TICK_CHANNEL:
+                        await self.process_tick(json.loads(message["data"]))
+                    elif channel == REDIS_CONTROL_CHANNEL:
+                        await self.process_control(json.loads(message["data"]))
             except asyncio.CancelledError:
                 logger.info("Candle Engine cancelled — shutting down.")
             except Exception as e:
                 logger.error(f"Candle Engine error: {e}", exc_info=True)
             finally:
                 hourly_task.cancel()
+
+    async def process_control(self, payload: Dict) -> None:
+        action = payload.get("action")
+        sym = payload.get("symbol", "").upper().strip()
+        if action == "remove" and sym:
+            logger.info(f"Purging removed asset {sym} from analysis cache and history.")
+            self.active_candles.pop(sym, None)
+            self.candle_start_times.pop(sym, None)
+            self.closed_candles_history.pop(sym, None)
+            self.last_telegram_alert_time.pop(sym, None)
+            self.prior_closes.pop(sym, None)
+            self.session_dates.pop(sym, None)
+            self.prior_day_data.pop(sym, None)
 
     # ──────────────────────────────────────────────────────────────
     #  Tick → Candle accumulation

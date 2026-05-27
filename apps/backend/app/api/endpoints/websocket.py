@@ -51,6 +51,22 @@ async def websocket_endpoint(websocket: WebSocket):
     await pubsub.subscribe(*CHANNELS)
     logger.debug(f"WebSocket subscribed to: {CHANNELS}")
 
+    # Retrieve and sync the persistent watchlist with the connected client
+    try:
+        stored = await client.smembers("watchlist:symbols")
+        if stored:
+            watchlist_symbols = list(stored)
+        else:
+            watchlist_symbols = ["TSLA", "NBIS", "COST", "SPX", "APPLOVIN"]
+            await client.sadd("watchlist:symbols", *watchlist_symbols)
+        logger.info(f"Syncing watchlist to user {username}: {watchlist_symbols}")
+        await websocket.send_json({
+            "channel": "watchlist:sync",
+            "data": watchlist_symbols,
+        })
+    except Exception as e:
+        logger.error(f"Failed to sync watchlist to client on connect: {e}")
+
     running = True
 
     async def client_receiver():
@@ -71,6 +87,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         await client.publish(
                             "market:control",
                             json.dumps({"action": "add", "symbol": raw_symbol}),
+                        )
+                    elif payload.get("type") == "remove":
+                        raw_symbol = payload.get("symbol", "").upper().strip()
+                        if not _is_valid_symbol(raw_symbol):
+                            logger.warning(
+                                f"Rejected invalid symbol from WebSocket client: {raw_symbol!r}"
+                            )
+                            continue
+                        logger.info(f"Client requested removal of symbol: {raw_symbol}")
+                        await client.publish(
+                            "market:control",
+                            json.dumps({"action": "remove", "symbol": raw_symbol}),
                         )
                 except (json.JSONDecodeError, TypeError) as ex:
                     logger.warning(f"Malformed WebSocket packet ignored: {ex}")

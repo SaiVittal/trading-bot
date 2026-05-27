@@ -57,7 +57,7 @@ class MarketFeedManager:
             }))
             logger.info(f"Subscribed to trades: {list(self.watchlist)}")
 
-            # Background task: sync dynamic UI watchlist additions
+            # Background task: sync dynamic UI watchlist additions and removals
             async def sync_watchlist():
                 client = redis_client.client
                 if not client:
@@ -70,10 +70,20 @@ class MarketFeedManager:
                                 continue
                             payload = json.loads(msg["data"])
                             sym = payload.get("symbol", "").upper().strip()
-                            if payload.get("action") == "add" and sym and sym not in self.watchlist:
-                                self.watchlist.add(sym)
-                                await ws.send(json.dumps({"action": "subscribe", "params": f"T.{sym}"}))
-                                logger.info(f"Dynamically subscribed to {sym}")
+                            if payload.get("action") == "add" and sym:
+                                if sym not in self.watchlist:
+                                    self.watchlist.add(sym)
+                                    if redis_client.client:
+                                        await redis_client.client.sadd("watchlist:symbols", sym)
+                                    await ws.send(json.dumps({"action": "subscribe", "params": f"T.{sym}"}))
+                                    logger.info(f"Dynamically subscribed to {sym}")
+                            elif payload.get("action") == "remove" and sym:
+                                if sym in self.watchlist:
+                                    self.watchlist.discard(sym)
+                                    if redis_client.client:
+                                        await redis_client.client.srem("watchlist:symbols", sym)
+                                    await ws.send(json.dumps({"action": "unsubscribe", "params": f"T.{sym}"}))
+                                    logger.info(f"Dynamically unsubscribed from {sym}")
                     except (asyncio.CancelledError, Exception):
                         pass
 
@@ -101,9 +111,19 @@ class MarketFeedManager:
             "Prices are synthetic but all strategies and Telegram alerts are live."
         )
 
+        from app.services.price_fix import PRICE_RANGES
+
+        def get_seed_price(sym: str) -> float:
+            if sym in _SEED_PRICES:
+                return _SEED_PRICES[sym]
+            if sym in PRICE_RANGES:
+                # Use midpoint of price range
+                return round((PRICE_RANGES[sym][0] + PRICE_RANGES[sym][1]) / 2, 2)
+            return 200.0
+
         prices: Dict[str, float] = {}
         for sym in self.watchlist:
-            prices[sym] = _SEED_PRICES.get(sym, 200.0)
+            prices[sym] = get_seed_price(sym)
 
         # Control channel listener (supports dynamic watchlist from UI)
         async def sync_watchlist_sim():
@@ -118,10 +138,20 @@ class MarketFeedManager:
                             continue
                         payload = json.loads(msg["data"])
                         sym = payload.get("symbol", "").upper().strip()
-                        if payload.get("action") == "add" and sym and sym not in self.watchlist:
-                            self.watchlist.add(sym)
-                            prices[sym] = _SEED_PRICES.get(sym, 200.0)
-                            logger.info(f"Simulation: added {sym} to watchlist")
+                        if payload.get("action") == "add" and sym:
+                            if sym not in self.watchlist:
+                                self.watchlist.add(sym)
+                                if redis_client.client:
+                                    await redis_client.client.sadd("watchlist:symbols", sym)
+                                prices[sym] = get_seed_price(sym)
+                                logger.info(f"Simulation: added {sym} to watchlist with price ${prices[sym]}")
+                        elif payload.get("action") == "remove" and sym:
+                            if sym in self.watchlist:
+                                self.watchlist.discard(sym)
+                                if redis_client.client:
+                                    await redis_client.client.srem("watchlist:symbols", sym)
+                                prices.pop(sym, None)
+                                logger.info(f"Simulation: removed {sym} from watchlist")
                 except (asyncio.CancelledError, Exception):
                     pass
 
@@ -138,7 +168,7 @@ class MarketFeedManager:
                     vol_per_tick = px * 0.0005
                     px += random.gauss(0, vol_per_tick)
                     # Mild mean-reversion toward seed price
-                    seed = _SEED_PRICES.get(sym, px)
+                    seed = get_seed_price(sym)
                     px += (seed - px) * 0.0002
                     px = max(px * 0.98, min(px * 1.02, px))  # clamp extreme swings
                     prices[sym] = round(px, 2)
@@ -172,6 +202,18 @@ class MarketFeedManager:
     # ── Main run loop ──────────────────────────────────────────────
 
     async def run(self) -> None:
+        if redis_client.client:
+            try:
+                stored = await redis_client.client.smembers("watchlist:symbols")
+                if stored:
+                    self.watchlist = {s for s in stored if s}
+                    logger.info(f"Loaded persistent watchlist from Redis: {list(self.watchlist)}")
+                else:
+                    await redis_client.client.sadd("watchlist:symbols", *self.watchlist)
+                    logger.info(f"Seeded default watchlist to Redis: {list(self.watchlist)}")
+            except Exception as e:
+                logger.error(f"Failed to load watchlist from Redis: {e}")
+
         has_keys = bool(
             settings.POLYGON_API_KEY
             and settings.POLYGON_API_KEY not in ("", "your_polygon_api_key_here")

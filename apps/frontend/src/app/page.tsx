@@ -381,6 +381,14 @@ export default function Dashboard() {
     if (selectedSymbol === sym) {
       setSelectedSymbol(updated[0] || "TSLA");
     }
+
+    // Emit remove signal over standard WebSocket connection
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "remove", symbol: sym }));
+      logSystem(`Unsubscribing from ticker stream for asset: ${sym}`, "system");
+    } else {
+      logSystem(`Cannot send unsubscribe request. WebSockets offline. Ticker locally removed.`, "error");
+    }
     logSystem(`Removed asset ${sym} from local workspace watchlist.`, "system");
   };
 
@@ -423,11 +431,6 @@ export default function Dashboard() {
         reconnectAttempts = 0;
         setConnected(true);
         logSystem("Standard WebSocket connection handshake successful. Feed bound to Redis.", "system");
-
-        // Restore subscriptions for active watchlist on reboot
-        watchlist.forEach(sym => {
-          ws.send(JSON.stringify({ type: "search", symbol: sym }));
-        });
       };
 
       ws.onmessage = (event) => {
@@ -497,6 +500,10 @@ export default function Dashboard() {
               setLatestAIInsight(signal.ai_insight);
             }
             triggerToasts(signal);
+          } else if (channel === "watchlist:sync") {
+            const symbols = data as string[];
+            setWatchlist(symbols);
+            logSystem(`Synced persistent watchlist from backend: ${symbols.join(", ")}`, "system");
           }
         } catch (e) {
           logSystem(`[ERROR] Processing WebSockets packet: ${(e as Error).message}`, "error");
