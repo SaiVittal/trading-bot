@@ -5,7 +5,7 @@ import random
 import time
 import logging
 import websockets
-from typing import Set, Dict
+from typing import Set, Dict, Optional
 from app.core.config import settings
 from app.core.redis_client import redis_client
 
@@ -26,8 +26,7 @@ class MarketFeedManager:
     def __init__(self) -> None:
         # Dynamic active set of symbols to scrape and tick
         self.watchlist: Set[str] = {
-            "TSLA", "AAPL", "NVDA", "SPY", "MSFT",
-            "NBIS", "META", "ASML", "COST", "AMD", "MU", "SPX"
+            "TSLA", "NBIS", "COST", "SPX", "APPLOVIN"
         }
 
     # ── Alpaca real-time feed ──────────────────────────────────────
@@ -159,7 +158,7 @@ class MarketFeedManager:
     # ── Shared publish helper ──────────────────────────────────────
 
     async def _publish(self, symbol: str, price: float,
-                       volume: int, ts: float = None) -> None:
+                       volume: int, ts: Optional[float] = None) -> None:
         if redis_client.client:
             await redis_client.client.publish(
                 REDIS_TICK_CHANNEL,

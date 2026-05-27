@@ -1,15 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { 
-  TrendingUp, 
-  TrendingDown, 
-  Activity, 
-  Bell, 
-  Terminal, 
-  Zap, 
-  ArrowUpRight, 
-  Cpu, 
+import {
+  TrendingUp,
+  TrendingDown,
+  Activity,
+  Bell,
+  Terminal,
+  Zap,
+  ArrowUpRight,
+  Cpu,
   Radio,
   Flame,
   Target,
@@ -65,11 +65,9 @@ export default function Dashboard() {
   // State variables
   const [connected, setConnected] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState<string>("TSLA");
-  const [watchlist, setWatchlist] = useState<string[]>([
-    "TSLA", "AAPL", "NVDA", "SPY", "MSFT", "NBIS", "META", "ASML", "COST", "AMD", "QCOM", "MU", "SPX"
-  ]);
+  const [watchlist, setWatchlist] = useState<string[]>(["TSLA", "NBIS", "COST", "SPX", "APPLOVIN"]);
   const [watchlistPrices, setWatchlistPrices] = useState<Record<string, number>>({});
-  
+
   const [searchInput, setSearchInput] = useState<string>("");
   const [currentPrice, setCurrentPrice] = useState<number>(0);
   const [priceDiff, setPriceDiff] = useState<"up" | "down" | "flat">("flat");
@@ -81,9 +79,9 @@ export default function Dashboard() {
   const [latestAIInsight, setLatestAIInsight] = useState<string>(
     "Awaiting real-time trade signals. OpenAI Quant Engine is fully armed and listening to active indicators..."
   );
-  
+
   const [telemetry, setTelemetry] = useState<LogLine[]>([]);
-  
+
   const [activeToast, setActiveToast] = useState<{
     id: string;
     platform: "telegram";
@@ -105,10 +103,10 @@ export default function Dashboard() {
   // Synchronize dynamic refs to avoid stale closures in event loops
   useEffect(() => {
     selectedSymbolRef.current = selectedSymbol;
-    
+
     // Redraw chart when active symbol shifts
     drawChart();
-    
+
     // Reset active candle baseline
     const filteredClosed = closedCandles.filter(c => c.symbol === selectedSymbol);
     if (filteredClosed.length > 0) {
@@ -194,10 +192,10 @@ export default function Dashboard() {
   const handleRemoveSymbol = (sym: string, e: React.MouseEvent) => {
     e.stopPropagation(); // Avoid triggering selected symbol change
     if (sym === "TSLA" && watchlist.length === 1) return; // Prevent empty watchlist
-    
+
     const updated = watchlist.filter(s => s !== sym);
     setWatchlist(updated);
-    
+
     if (selectedSymbol === sym) {
       setSelectedSymbol(updated[0] || "TSLA");
     }
@@ -254,7 +252,7 @@ export default function Dashboard() {
 
           if (channel === "market:ticks") {
             const tick = data as TickData;
-            
+
             // 1. Maintain watchlist prices state
             setWatchlistPrices(prev => ({ ...prev, [tick.symbol]: tick.price }));
 
@@ -273,7 +271,7 @@ export default function Dashboard() {
                 const high = prev.high === 0 ? tick.price : Math.max(prev.high, tick.price);
                 const low = prev.low === 0 ? tick.price : Math.min(prev.low, tick.price);
                 const volume = parseFloat((prev.volume + tick.volume).toFixed(6));
-                
+
                 return {
                   symbol: tick.symbol,
                   open,
@@ -326,7 +324,7 @@ export default function Dashboard() {
       ws.onclose = () => {
         setConnected(false);
         logSystem("WebSocket pipeline detached. Starting backoff reconnect...", "error");
-        
+
         reconnectTimeout = setTimeout(() => {
           reconnectAttempts++;
           connect();
@@ -353,7 +351,7 @@ export default function Dashboard() {
     const dpr = window.devicePixelRatio || 1;
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
-    
+
     if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
       canvas.width = width * dpr;
       canvas.height = height * dpr;
@@ -365,7 +363,7 @@ export default function Dashboard() {
     // Filter closed candles by active focused symbol
     const candles = closedCandlesRef.current.filter(c => c.symbol === selectedSymbolRef.current);
     const active = activeCandleRef.current;
-    
+
     if (active && active.symbol === selectedSymbolRef.current && active.open > 0) {
       candles.push(active);
     }
@@ -476,7 +474,7 @@ export default function Dashboard() {
       ctx.lineWidth = 2;
       ctx.shadowColor = "#c084fc";
       ctx.shadowBlur = 4;
-      
+
       ctx.beginPath();
       emaPoints.slice(-15).forEach((pt, i) => {
         const x = getX(i);
@@ -494,14 +492,14 @@ export default function Dashboard() {
 
   return (
     <div className="flex-1 relative overflow-hidden min-h-screen pb-12 bg-[#020617]">
-      
+
       {/* Cybernetic Orbs */}
       <div className="absolute top-[-12vw] right-[-8vw] w-[50vw] h-[50vw] rounded-full bg-indigo-500 opacity-[0.14] blur-[150px] pointer-events-none"></div>
       <div className="absolute bottom-[-15vw] left-[-10vw] w-[50vw] h-[50vw] rounded-full bg-cyan-400 opacity-[0.12] blur-[150px] pointer-events-none"></div>
 
       {/* Main Core Container */}
       <div className="max-w-[1640px] mx-auto p-4 md:p-8 flex flex-col gap-6 relative z-10">
-        
+
         {/* State-of-the-Art Header Panel */}
         <header className="flex flex-col md:flex-row justify-between md:items-center gap-4 p-6 bg-slate-900/65 border border-slate-800/80 backdrop-blur-3xl rounded-2xl shadow-2xl">
           <div className="flex items-center gap-4">
@@ -520,13 +518,12 @@ export default function Dashboard() {
               </p>
             </div>
           </div>
-          
+
           <div className="flex flex-wrap items-center gap-2.5">
-            <span className={`badge flex items-center gap-1.5 font-mono text-xs px-3.5 py-1.5 rounded-full ${
-              connected 
-                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
+            <span className={`badge flex items-center gap-1.5 font-mono text-xs px-3.5 py-1.5 rounded-full ${connected
+                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
                 : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-            }`}>
+              }`}>
               <Radio size={12} className={connected ? "animate-pulse text-emerald-400" : ""} />
               {connected ? "LIVE MULTI-FEED CONNECTED" : "BROADCASTER DISCONNECTED"}
             </span>
@@ -542,19 +539,17 @@ export default function Dashboard() {
           <div className="p-4 bg-slate-900/40 border border-slate-800/80 rounded-xl backdrop-blur flex justify-between items-center">
             <div className="flex flex-col gap-0.5">
               <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Active Asset Price ({selectedSymbol})</span>
-              <span className={`font-mono text-2xl font-bold tracking-tight transition-colors duration-300 ${
-                priceDiff === "up" ? "text-emerald-400" : priceDiff === "down" ? "text-rose-400" : "text-white"
-              }`}>
-                {currentPrice > 0 
-                  ? `$${currentPrice.toLocaleString("en-US", { minimumFractionDigits: 2 })}` 
+              <span className={`font-mono text-2xl font-bold tracking-tight transition-colors duration-300 ${priceDiff === "up" ? "text-emerald-400" : priceDiff === "down" ? "text-rose-400" : "text-white"
+                }`}>
+                {currentPrice > 0
+                  ? `$${currentPrice.toLocaleString("en-US", { minimumFractionDigits: 2 })}`
                   : (watchlistPrices[selectedSymbol] !== undefined
-                      ? `$${watchlistPrices[selectedSymbol].toLocaleString("en-US", { minimumFractionDigits: 2 })}` 
-                      : "Loading...")}
+                    ? `$${watchlistPrices[selectedSymbol].toLocaleString("en-US", { minimumFractionDigits: 2 })}`
+                    : "Loading...")}
               </span>
             </div>
-            <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
-              priceDiff === "up" ? "bg-emerald-500/10 text-emerald-400" : priceDiff === "down" ? "bg-rose-500/10 text-rose-400" : "bg-slate-800 text-slate-500"
-            }`}>
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${priceDiff === "up" ? "bg-emerald-500/10 text-emerald-400" : priceDiff === "down" ? "bg-rose-500/10 text-rose-400" : "bg-slate-800 text-slate-500"
+              }`}>
               {priceDiff === "up" ? "▲" : priceDiff === "down" ? "▼" : "—"}
             </div>
           </div>
@@ -587,7 +582,7 @@ export default function Dashboard() {
 
         {/* Dashboard Grid Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          
+
           {/* Watchlist Sidebar Column (New Feature!) */}
           <section className="bg-slate-900/65 border border-slate-800/80 rounded-3xl shadow-2xl flex flex-col p-6 gap-5 backdrop-blur-3xl lg:col-span-1">
             <div className="flex flex-col gap-1.5">
@@ -608,7 +603,7 @@ export default function Dashboard() {
                 className="w-full pl-10 pr-10 py-2.5 rounded-xl border border-slate-800/80 bg-slate-950/80 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/80 transition-colors"
               />
               <Search size={14} className="absolute left-3.5 text-slate-500" />
-              <button 
+              <button
                 type="submit"
                 className="absolute right-2.5 w-6 h-6 rounded-lg bg-indigo-500 hover:bg-indigo-600 flex items-center justify-center transition-colors text-white"
               >
@@ -621,30 +616,27 @@ export default function Dashboard() {
               {watchlist.map(sym => {
                 const active = sym === selectedSymbol;
                 const price = watchlistPrices[sym];
-                
+
                 return (
                   <div
                     key={sym}
                     onClick={() => setSelectedSymbol(sym)}
-                    className={`p-3.5 rounded-xl border transition-all duration-300 cursor-pointer flex justify-between items-center ${
-                      active 
-                        ? "bg-gradient-to-r from-indigo-500/15 via-purple-500/10 to-transparent border-indigo-500/50 shadow-indigo-500/5" 
+                    className={`p-3.5 rounded-xl border transition-all duration-300 cursor-pointer flex justify-between items-center ${active
+                        ? "bg-gradient-to-r from-indigo-500/15 via-purple-500/10 to-transparent border-indigo-500/50 shadow-indigo-500/5"
                         : "bg-slate-950/30 border-slate-800/80 hover:bg-slate-950/50"
-                    }`}
+                      }`}
                   >
                     <div className="flex flex-col gap-0.5">
-                      <span className={`font-mono text-sm font-extrabold tracking-wider ${
-                        active ? "text-indigo-300" : "text-slate-300"
-                      }`}>
+                      <span className={`font-mono text-sm font-extrabold tracking-wider ${active ? "text-indigo-300" : "text-slate-300"
+                        }`}>
                         {sym}
                       </span>
                       <span className="text-[9px] text-slate-500 uppercase font-mono">Stock Feed</span>
                     </div>
 
                     <div className="flex items-center gap-3 font-mono">
-                      <span className={`text-xs font-semibold font-mono ${
-                        active ? "text-cyan-400" : "text-slate-300"
-                      }`}>
+                      <span className={`text-xs font-semibold font-mono ${active ? "text-cyan-400" : "text-slate-300"
+                        }`}>
                         {price !== undefined ? `$${price.toLocaleString("en-US", { minimumFractionDigits: 2 })}` : "Loading..."}
                       </span>
 
@@ -661,10 +653,10 @@ export default function Dashboard() {
               })}
             </div>
           </section>
-          
+
           {/* Chart Wrapper Column */}
           <div className="lg:col-span-2 flex flex-col gap-6">
-            
+
             {/* HTML5 Candlestick Chart Card */}
             <section className="bg-slate-900/65 border border-slate-800/80 rounded-3xl shadow-2xl flex flex-col overflow-hidden backdrop-blur-3xl">
               <div className="p-6 border-b border-slate-800 flex justify-between items-center gap-4">
@@ -710,7 +702,7 @@ export default function Dashboard() {
             {/* Glowing OpenAI AI Quant Insights Panel */}
             <section className="p-6 bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-transparent border border-indigo-500/30 rounded-3xl shadow-2xl backdrop-blur relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
-              
+
               <div className="flex gap-4 items-start relative z-10">
                 <div className="w-10 h-10 bg-indigo-500/20 border border-indigo-500/40 rounded-xl flex items-center justify-center shadow-lg">
                   <Sparkles size={20} className="text-indigo-400 animate-pulse" />
@@ -760,19 +752,17 @@ export default function Dashboard() {
                 </div>
               ) : (
                 activeAlerts.map((sig, i) => (
-                  <div 
-                    key={i} 
-                    className={`p-4 rounded-xl border animate-slide-in flex flex-col gap-3 shadow-lg transition-transform duration-300 hover:scale-[1.01] ${
-                      sig.action === "BUY" 
-                        ? "bg-emerald-500/5 border-emerald-500/15" 
+                  <div
+                    key={i}
+                    className={`p-4 rounded-xl border animate-slide-in flex flex-col gap-3 shadow-lg transition-transform duration-300 hover:scale-[1.01] ${sig.action === "BUY"
+                        ? "bg-emerald-500/5 border-emerald-500/15"
                         : "bg-rose-500/5 border-rose-500/15"
-                    }`}
+                      }`}
                   >
                     {/* Header */}
                     <div className="flex justify-between items-center">
-                      <span className={`text-[10px] font-extrabold tracking-wider px-3 py-0.5 rounded-full flex items-center gap-1 ${
-                        sig.action === "BUY" ? "bg-emerald-500 text-slate-950" : "bg-rose-500 text-white"
-                      }`}>
+                      <span className={`text-[10px] font-extrabold tracking-wider px-3 py-0.5 rounded-full flex items-center gap-1 ${sig.action === "BUY" ? "bg-emerald-500 text-slate-950" : "bg-rose-500 text-white"
+                        }`}>
                         {sig.action === "BUY" ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
                         {sig.action} SIGNAL
                       </span>
@@ -843,9 +833,9 @@ export default function Dashboard() {
                 <span className="text-slate-500 select-none">[{line.time}]</span>
                 <span className={
                   line.type === "system" ? "text-cyan-400" :
-                  line.type === "tick" ? "text-slate-500" :
-                  line.type === "candle" ? "text-violet-400" :
-                  line.type === "alert" ? "text-emerald-400 font-semibold" : "text-rose-400"
+                    line.type === "tick" ? "text-slate-500" :
+                      line.type === "candle" ? "text-violet-400" :
+                        line.type === "alert" ? "text-emerald-400 font-semibold" : "text-rose-400"
                 }>
                   {line.text}
                 </span>
