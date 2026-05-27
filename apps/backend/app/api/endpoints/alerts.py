@@ -22,7 +22,7 @@ async def get_telegram_alerts_status(
     if redis_client.client:
         try:
             status_val = await redis_client.client.get("telegram_alerts_enabled")
-            if status_val == b"false":
+            if status_val == "false":
                 enabled = False
         except Exception as e:
             raise HTTPException(

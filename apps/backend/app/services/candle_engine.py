@@ -599,7 +599,7 @@ class RealtimeCandleEngine:
         if redis_client.client:
             try:
                 status_val = await redis_client.client.get("telegram_alerts_enabled")
-                if status_val == b"false":
+                if status_val == "false":
                     logger.info("Telegram alerts are dynamically disabled via Redis toggle. Skipping dispatch.")
                     return
             except Exception as e:
