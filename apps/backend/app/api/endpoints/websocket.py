@@ -4,6 +4,7 @@ import logging
 import re
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.core.redis_client import redis_client
+from app.core.auth import decode_access_token
 
 router = APIRouter()
 logger = logging.getLogger("app.api.websocket")
@@ -23,7 +24,22 @@ def _is_valid_symbol(raw: str) -> bool:
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint — bridges clients to the Redis event stream."""
     await websocket.accept()
-    logger.info("New WebSocket connection accepted.")
+    
+    # Authenticate the WebSocket connection using query parameter token
+    token = websocket.query_params.get("token")
+    if not token:
+        logger.warning("Rejected WebSocket connection: Token missing in query parameters.")
+        await websocket.close(code=1008)
+        return
+        
+    payload = decode_access_token(token)
+    if not payload:
+        logger.warning("Rejected WebSocket connection: Invalid or expired access token.")
+        await websocket.close(code=1008)
+        return
+        
+    username = payload.get("sub")
+    logger.info(f"New authenticated WebSocket connection accepted for user: {username}.")
 
     client = redis_client.client
     if not client:

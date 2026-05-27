@@ -3,16 +3,29 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastAPIIntegration
+
 from app.core.config import settings
 from app.core.redis_client import redis_client
 from app.api.router import api_router
 from app.services.market_feed import start_market_feed_simulation
 from app.services.candle_engine import start_candle_engine
+from app.core.logging_config import setup_logging
+from app.core.database import init_db
 
-logging.basicConfig(
-    level=settings.LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# 1. Initialize Sentry Observability SDK if DSN is set
+if settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENV,
+        integrations=[FastAPIIntegration()],
+        traces_sample_rate=0.1,  # Profile 10% of transaction paths
+        profiles_sample_rate=0.1,
+    )
+
+# 2. Configure environment-specific structured logger
+setup_logging()
 logger = logging.getLogger("app.main")
 
 
@@ -20,6 +33,15 @@ logger = logging.getLogger("app.main")
 async def lifespan(app: FastAPI):
     logger.info("Application startup...")
 
+    # A. Verify PostgreSQL tables and seed default admin user
+    try:
+        logger.info("Initializing database tables and seeding defaults...")
+        await init_db()
+        logger.info("Database initialized successfully.")
+    except Exception as e:
+        logger.error(f"Critical error during database initialization: {e}", exc_info=True)
+
+    # B. Initialize Redis connection
     redis_client.initialize()
     if await redis_client.ping():
         logger.info("Redis connection verified.")

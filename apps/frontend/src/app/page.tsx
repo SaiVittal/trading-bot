@@ -62,6 +62,15 @@ interface LogLine {
 }
 
 export default function Dashboard() {
+  // Authentication & Session state
+  const [token, setToken] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [usernameInput, setUsernameInput] = useState("");
+  const [emailInput, setEmailInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+
   // State variables
   const [connected, setConnected] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState<string>("TSLA");
@@ -100,8 +109,19 @@ export default function Dashboard() {
   const selectedSymbolRef = useRef<string>("TSLA");
   const wsRef = useRef<WebSocket | null>(null);
 
+  // Safely restore token on dynamic page hydrate
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const savedToken = localStorage.getItem("auth_token");
+      if (savedToken) {
+        setToken(savedToken);
+      }
+    }
+  }, []);
+
   // Synchronize dynamic refs to avoid stale closures in event loops
   useEffect(() => {
+    if (!token) return;
     selectedSymbolRef.current = selectedSymbol;
 
     // Redraw chart when active symbol shifts
@@ -124,17 +144,21 @@ export default function Dashboard() {
         symbol: selectedSymbol, open: 0, high: 0, low: 0, close: 0, volume: 0, timestamp: 0
       });
     }
-  }, [selectedSymbol]);
+  }, [selectedSymbol, token]);
 
   useEffect(() => {
-    closedCandlesRef.current = closedCandles;
-    drawChart();
-  }, [closedCandles]);
+    if (token) {
+      closedCandlesRef.current = closedCandles;
+      drawChart();
+    }
+  }, [closedCandles, token]);
 
   useEffect(() => {
-    activeCandleRef.current = activeCandle;
-    drawChart();
-  }, [activeCandle]);
+    if (token) {
+      activeCandleRef.current = activeCandle;
+      drawChart();
+    }
+  }, [activeCandle, token]);
 
   // Safe client telemetry logger
   const logSystem = (text: string, type: LogLine["type"]) => {
@@ -144,6 +168,106 @@ export default function Dashboard() {
       if (lines.length > 30) lines.shift();
       return lines;
     });
+  };
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    setIsAuthLoading(true);
+
+    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+    try {
+      if (authMode === "login") {
+        const formData = new URLSearchParams();
+        formData.append("username", usernameInput);
+        formData.append("password", passwordInput);
+
+        const response = await fetch(`${apiBaseUrl}/api/v1/auth/login`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: formData,
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "Incorrect username or password.");
+        }
+
+        localStorage.setItem("auth_token", data.access_token);
+        setToken(data.access_token);
+        logSystem(`User logged in as ${usernameInput}`, "system");
+        
+        // Reset inputs
+        setUsernameInput("");
+        setPasswordInput("");
+      } else {
+        const response = await fetch(`${apiBaseUrl}/api/v1/auth/register`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            username: usernameInput,
+            email: emailInput,
+            password: passwordInput,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "Registration failed. Try another username/email.");
+        }
+
+        // Auto-login on success
+        const formData = new URLSearchParams();
+        formData.append("username", usernameInput);
+        formData.append("password", passwordInput);
+
+        const loginResponse = await fetch(`${apiBaseUrl}/api/v1/auth/login`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: formData,
+        });
+
+        const loginData = await loginResponse.json();
+
+        if (!loginResponse.ok) {
+          throw new Error("Account created! But automated login failed.");
+        }
+
+        localStorage.setItem("auth_token", loginData.access_token);
+        setToken(loginData.access_token);
+        logSystem(`User registered and authenticated: ${usernameInput}`, "system");
+        
+        // Reset inputs
+        setUsernameInput("");
+        setEmailInput("");
+        setPasswordInput("");
+      }
+    } catch (err: any) {
+      setAuthError(err.message || "Authentication pipeline failure.");
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("auth_token");
+    setToken(null);
+    setConnected(false);
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    // Clear dynamic session records
+    setWatchlistPrices({});
+    setTelemetry([{ text: "Session terminated. Please authenticate to reconnect.", type: "system", time: new Date().toLocaleTimeString() }]);
   };
 
   // Hydration safety line
@@ -204,6 +328,8 @@ export default function Dashboard() {
 
   // WebSockets client implementation
   useEffect(() => {
+    if (!token) return;
+
     let ws: WebSocket;
     let reconnectTimeout: NodeJS.Timeout;
     let reconnectAttempts = 0;
@@ -230,7 +356,9 @@ export default function Dashboard() {
         wsUrl = `${wsProtocol}://${wsHost}:8000/api/v1/ws`;
       }
 
-      ws = new WebSocket(wsUrl);
+      // Secure connection by appending user's JWT access token
+      const wsUrlWithToken = `${wsUrl}?token=${token}`;
+      ws = new WebSocket(wsUrlWithToken);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -338,7 +466,7 @@ export default function Dashboard() {
       if (ws) ws.close();
       clearTimeout(reconnectTimeout);
     };
-  }, []);
+  }, [token]);
 
   // HTML5 Canvas chart renderer
   const drawChart = () => {
@@ -399,7 +527,7 @@ export default function Dashboard() {
     minP -= priceRange * 0.15;
 
     const padLeft = 10;
-    const padRight = 75;
+    const padRight = width < 480 ? 52 : 75;
     const padTop = 30;
     const padBottom = 30;
 
@@ -487,6 +615,136 @@ export default function Dashboard() {
     }
   };
 
+  // Redraw chart dynamically on mobile orientation or viewport resize
+  useEffect(() => {
+    if (!token) return;
+    const handleResize = () => {
+      drawChart();
+    };
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [token]);
+
+  if (!token) {
+    return (
+      <div className="relative overflow-hidden min-h-screen bg-[#020617] flex items-center justify-center p-4">
+        {/* Cybernetic Orbs */}
+        <div className="absolute top-[-10vw] right-[-10vw] w-[40vw] h-[40vw] rounded-full bg-indigo-500 opacity-[0.15] blur-[130px] pointer-events-none"></div>
+        <div className="absolute bottom-[-10vw] left-[-10vw] w-[40vw] h-[40vw] rounded-full bg-cyan-400 opacity-[0.13] blur-[130px] pointer-events-none"></div>
+
+        <div className="w-full max-w-md bg-slate-900/65 border border-slate-800/80 backdrop-blur-3xl p-8 rounded-3xl shadow-2xl relative z-10 flex flex-col gap-6">
+          <div className="text-center flex flex-col gap-2">
+            <h1 className="text-2xl font-extrabold tracking-tight text-white">
+              Trading Intelligence <span className="font-extralight text-indigo-400">Platform</span>
+            </h1>
+            <p className="text-xs text-slate-400">
+              {authMode === "login"
+                ? "Enter your credentials to access live quant telemetry feeds"
+                : "Register a secure user account to start monitoring and paper trading"}
+            </p>
+          </div>
+
+          <form onSubmit={handleAuthSubmit} className="flex flex-col gap-4">
+            {authError && (
+              <div className="p-3.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-xs font-mono text-center">
+                ⚠️ {authError}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Username</label>
+              <input
+                type="text"
+                required
+                value={usernameInput}
+                onChange={e => setUsernameInput(e.target.value)}
+                placeholder="quant_trader"
+                className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+              />
+            </div>
+
+            {authMode === "register" && (
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Email Address</label>
+                <input
+                  type="email"
+                  required
+                  value={emailInput}
+                  onChange={e => setEmailInput(e.target.value)}
+                  placeholder="trader@quant.bot"
+                  className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                />
+              </div>
+            )}
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Password</label>
+              <input
+                type="password"
+                required
+                value={passwordInput}
+                onChange={e => setPasswordInput(e.target.value)}
+                placeholder="••••••••••••"
+                className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={isAuthLoading}
+              className="mt-2 w-full py-3 bg-indigo-500 hover:bg-indigo-600 disabled:bg-indigo-500/50 text-white rounded-xl font-semibold text-sm transition-colors shadow-lg flex items-center justify-center gap-2 cursor-pointer"
+            >
+              {isAuthLoading ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/35 border-t-white rounded-full animate-spin" />
+                  Processing...
+                </>
+              ) : authMode === "login" ? (
+                "Authenticate Session"
+              ) : (
+                "Create Quant Account"
+              )}
+            </button>
+          </form>
+
+          <div className="text-center text-xs text-slate-450">
+            {authMode === "login" ? (
+              <>
+                First time logging in?{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode("register");
+                    setAuthError("");
+                  }}
+                  className="text-indigo-400 hover:underline font-semibold cursor-pointer"
+                >
+                  Register an account
+                </button>
+              </>
+            ) : (
+              <>
+                Already have an active account?{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode("login");
+                    setAuthError("");
+                  }}
+                  className="text-indigo-400 hover:underline font-semibold cursor-pointer"
+                >
+                  Sign in here
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Filter alerts specifically for selected active symbol
   const activeAlerts = signals.filter(s => s.symbol === selectedSymbol);
 
@@ -531,11 +789,17 @@ export default function Dashboard() {
               <Cpu size={12} />
               OpenAI GPT-4o Insights Active
             </span>
+            <button
+              onClick={handleLogout}
+              className="badge bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/25 px-3.5 py-1.5 rounded-full flex items-center gap-1.5 font-mono text-xs cursor-pointer transition-colors"
+            >
+              Sign Out
+            </button>
           </div>
         </header>
 
         {/* Real-time Statistics Strip */}
-        <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="p-4 bg-slate-900/40 border border-slate-800/80 rounded-xl backdrop-blur flex justify-between items-center">
             <div className="flex flex-col gap-0.5">
               <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Active Asset Price ({selectedSymbol})</span>
@@ -612,7 +876,7 @@ export default function Dashboard() {
             </form>
 
             {/* Watchlist Card Loop */}
-            <div className="flex flex-col gap-2.5 overflow-y-auto max-h-[460px] pr-1">
+            <div className="flex flex-col gap-2.5 overflow-y-auto max-h-[220px] lg:max-h-[460px] pr-1">
               {watchlist.map(sym => {
                 const active = sym === selectedSymbol;
                 const price = watchlistPrices[sym];

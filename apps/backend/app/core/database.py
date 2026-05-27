@@ -37,3 +37,39 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
+
+
+async def init_db() -> None:
+    """
+    Asynchronously initialize the database.
+    Creates all defined SQLAlchemy models (users, signals, trades) if missing,
+    and seeds a default administrator account.
+    """
+    from app.models.models import Base, User
+    from app.core.auth import get_password_hash
+    from sqlalchemy import select
+
+    # 1. Asynchronously create all tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # 2. Seed a default administrator user if users table is empty
+    async with async_session() as session:
+        try:
+            stmt = select(User).limit(1)
+            result = await session.execute(stmt)
+            if not result.scalar_one_or_none():
+                admin_user = User(
+                    username="admin",
+                    email="admin@tradingplatform.local",
+                    hashed_password=get_password_hash("adminpass123"),
+                    role="admin",
+                    is_active=True
+                )
+                session.add(admin_user)
+                await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
