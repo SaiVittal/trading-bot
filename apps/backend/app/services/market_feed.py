@@ -29,32 +29,31 @@ class MarketFeedManager:
             "TSLA", "NBIS", "COST", "SPX", "APPLOVIN"
         }
 
-    # ── Alpaca real-time feed ──────────────────────────────────────
+    # ── Polygon real-time feed ──────────────────────────────────────
 
-    async def run_alpaca_feed(self) -> None:
-        """Connect to Alpaca IEX real-time WebSocket and stream trades."""
-        url = "wss://stream.data.alpaca.markets/v2/iex"
-        logger.info(f"Connecting to Alpaca IEX WebSocket: {url}")
+    async def run_polygon_feed(self) -> None:
+        """Connect to Polygon.io real-time Stocks WebSocket and stream trades."""
+        url = "wss://socket.polygon.io/stocks"
+        logger.info(f"Connecting to Polygon.io Stocks WebSocket: {url}")
 
         async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
             greeting = await ws.recv()
-            logger.info(f"Alpaca greeting: {greeting}")
+            logger.info(f"Polygon greeting: {greeting}")
 
             await ws.send(json.dumps({
                 "action": "auth",
-                "key":    settings.ALPACA_API_KEY_ID,
-                "secret": settings.ALPACA_API_SECRET_KEY,
+                "params": settings.POLYGON_API_KEY,
             }))
             auth_status = await ws.recv()
-            logger.info(f"Alpaca auth: {auth_status}")
+            logger.info(f"Polygon auth: {auth_status}")
 
             status_data = json.loads(auth_status)
-            if status_data and status_data[0].get("msg") != "authenticated":
-                raise ValueError(f"Alpaca auth rejected: {auth_status}")
+            if status_data and status_data[0].get("status") != "auth_success":
+                raise ValueError(f"Polygon auth rejected: {auth_status}")
 
             await ws.send(json.dumps({
                 "action": "subscribe",
-                "trades": list(self.watchlist),
+                "params": ",".join(f"T.{sym}" for sym in self.watchlist),
             }))
             logger.info(f"Subscribed to trades: {list(self.watchlist)}")
 
@@ -73,7 +72,7 @@ class MarketFeedManager:
                             sym = payload.get("symbol", "").upper().strip()
                             if payload.get("action") == "add" and sym and sym not in self.watchlist:
                                 self.watchlist.add(sym)
-                                await ws.send(json.dumps({"action": "subscribe", "trades": [sym]}))
+                                await ws.send(json.dumps({"action": "subscribe", "params": f"T.{sym}"}))
                                 logger.info(f"Dynamically subscribed to {sym}")
                     except (asyncio.CancelledError, Exception):
                         pass
@@ -83,8 +82,8 @@ class MarketFeedManager:
                 while True:
                     raw = await ws.recv()
                     for item in json.loads(raw):
-                        if item.get("T") == "t":
-                            await self._publish(item["S"], float(item["p"]), int(item["s"]))
+                        if item.get("ev") == "T":
+                            await self._publish(item["sym"], float(item["p"]), int(item["s"]))
             finally:
                 sync_task.cancel()
 
@@ -174,33 +173,32 @@ class MarketFeedManager:
 
     async def run(self) -> None:
         has_keys = bool(
-            settings.ALPACA_API_KEY_ID
-            and settings.ALPACA_API_SECRET_KEY
-            and settings.ALPACA_API_KEY_ID not in ("", "your_alpaca_key_id_here")
+            settings.POLYGON_API_KEY
+            and settings.POLYGON_API_KEY not in ("", "your_polygon_api_key_here")
         )
 
         if not has_keys:
-            logger.warning("No Alpaca keys configured — using simulation.")
+            logger.warning("No Polygon API keys configured — using simulation.")
             await self.run_simulation()
             return
 
-        alpaca_failures = 0
+        polygon_failures = 0
         while True:
             try:
-                await self.run_alpaca_feed()
-                alpaca_failures = 0
+                await self.run_polygon_feed()
+                polygon_failures = 0
             except Exception as e:
-                alpaca_failures += 1
+                polygon_failures += 1
                 logger.error(
-                    f"Alpaca feed failed (attempt {alpaca_failures}): {e}"
+                    f"Polygon feed failed (attempt {polygon_failures}): {e}"
                 )
-                if alpaca_failures >= 3:
+                if polygon_failures >= 3:
                     logger.warning(
-                        "Alpaca failed 3 times — switching to simulation mode permanently."
+                        "Polygon failed 3 times — switching to simulation mode permanently."
                     )
                     await self.run_simulation()
                     return
-                backoff = min(5 * alpaca_failures, 30)
+                backoff = min(5 * polygon_failures, 30)
                 await asyncio.sleep(backoff)
 
 

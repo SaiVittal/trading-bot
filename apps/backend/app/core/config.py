@@ -30,9 +30,8 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: Optional[str] = Field(None, validation_alias="OPENAI_API_KEY")
 
-    # Alpaca Markets
-    ALPACA_API_KEY_ID:    Optional[str] = Field(None, validation_alias="ALPACA_API_KEY_ID")
-    ALPACA_API_SECRET_KEY: Optional[str] = Field(None, validation_alias="ALPACA_API_SECRET_KEY")
+    # Polygon.io
+    POLYGON_API_KEY:      Optional[str] = Field(None, validation_alias="POLYGON_API_KEY")
 
     # Telegram
     TELEGRAM_BOT_TOKEN:    Optional[str] = Field(None,  validation_alias="TELEGRAM_BOT_TOKEN")
