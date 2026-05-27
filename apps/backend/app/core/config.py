@@ -61,6 +61,8 @@ class Settings(BaseSettings):
             if url.startswith("postgresql://"):
                 url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
             # Ensure sslmode=require doesn't conflict with asyncpg unless stripped/properly configured, but standard Neon works fine
+            if "sslmode=require" in url:
+                url = url.replace("sslmode=require", "ssl=require")
             return url
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"

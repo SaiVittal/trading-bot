@@ -15,7 +15,16 @@ import {
   Search,
   Plus,
   Trash2,
-  Bookmark
+  Bookmark,
+  Eye,
+  EyeOff,
+  X,
+  Zap,
+  Shield,
+  MessageSquare,
+  Share2,
+  ChevronRight,
+  Flame
 } from "lucide-react";
 
 // Types
@@ -66,6 +75,18 @@ export default function Dashboard() {
   const [passwordInput, setPasswordInput] = useState("");
   const [authError, setAuthError] = useState("");
   const [isAuthLoading, setIsAuthLoading] = useState(false);
+  
+  // Custom UX/UI additions
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
+  // Simulated landing page live states
+  const [mockPrice, setMockPrice] = useState(172.40);
+  const [mockDiff, setMockDiff] = useState<"up" | "down" | "flat">("up");
+  const [mockHistory, setMockHistory] = useState<number[]>([170.2, 171.0, 170.8, 171.5, 171.2, 172.0, 171.8, 172.5, 172.2, 172.9]);
+  const [mockUpvotes, setMockUpvotes] = useState(482);
+  const [hasUpvoted, setHasUpvoted] = useState(false);
+  const [spawnSparkles, setSpawnSparkles] = useState(false);
 
   // State variables
   const [connected, setConnected] = useState(false);
@@ -167,6 +188,23 @@ export default function Dashboard() {
     });
   };
 
+  // Mock live ticker & terminal simulation for landing page
+  useEffect(() => {
+    if (token) return;
+
+    const interval = setInterval(() => {
+      setMockPrice(prev => {
+        const change = (Math.random() - 0.46) * 0.9;
+        const next = parseFloat((prev + change).toFixed(2));
+        setMockDiff(change > 0 ? "up" : "down");
+        setMockHistory(hist => [...hist.slice(-11), next]);
+        return next;
+      });
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [token]);
+
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError("");
@@ -188,7 +226,15 @@ export default function Dashboard() {
           body: formData,
         });
 
-        const data = await response.json();
+        let data;
+        const contentType = response.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          data = await response.json();
+        } else {
+          const errorText = await response.text();
+          console.error("Non-JSON Response received:", errorText);
+          throw new Error("The API server returned an invalid response (likely offline or deploying). Please try again shortly.");
+        }
 
         if (!response.ok) {
           throw new Error(data.detail || "Incorrect username or password.");
@@ -201,6 +247,7 @@ export default function Dashboard() {
         // Reset inputs
         setUsernameInput("");
         setPasswordInput("");
+        setShowAuthModal(false);
       } else {
         const response = await fetch(`${apiBaseUrl}/api/v1/auth/register`, {
           method: "POST",
@@ -214,7 +261,15 @@ export default function Dashboard() {
           }),
         });
 
-        const data = await response.json();
+        let data;
+        const contentType = response.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          data = await response.json();
+        } else {
+          const errorText = await response.text();
+          console.error("Non-JSON Response received:", errorText);
+          throw new Error("The API server returned an invalid response (likely offline or deploying). Please try again shortly.");
+        }
 
         if (!response.ok) {
           throw new Error(data.detail || "Registration failed. Try another username/email.");
@@ -233,7 +288,13 @@ export default function Dashboard() {
           body: formData,
         });
 
-        const loginData = await loginResponse.json();
+        let loginData;
+        const loginContentType = loginResponse.headers.get("content-type");
+        if (loginContentType && loginContentType.includes("application/json")) {
+          loginData = await loginResponse.json();
+        } else {
+          throw new Error("Account created! But automated login received an invalid server response.");
+        }
 
         if (!loginResponse.ok) {
           throw new Error("Account created! But automated login failed.");
@@ -247,6 +308,7 @@ export default function Dashboard() {
         setUsernameInput("");
         setEmailInput("");
         setPasswordInput("");
+        setShowAuthModal(false);
       }
     } catch (err: unknown) {
       const error = err as Error;
@@ -453,6 +515,7 @@ export default function Dashboard() {
         setConnected(false);
         logSystem("WebSocket pipeline detached. Starting backoff reconnect...", "error");
 
+        // Backoff reconnect
         reconnectTimeout = setTimeout(() => {
           reconnectAttempts++;
           connect();
@@ -628,120 +691,558 @@ export default function Dashboard() {
     };
   }, [token]);
 
-  if (!token) {
-    return (
-      <div className="relative overflow-hidden min-h-screen bg-[#020617] flex items-center justify-center p-4">
-        {/* Cybernetic Orbs */}
-        <div className="absolute top-[-10vw] right-[-10vw] w-[40vw] h-[40vw] rounded-full bg-indigo-500 opacity-[0.15] blur-[130px] pointer-events-none"></div>
-        <div className="absolute bottom-[-10vw] left-[-10vw] w-[40vw] h-[40vw] rounded-full bg-cyan-400 opacity-[0.13] blur-[130px] pointer-events-none"></div>
+  // Product Hunt Upvote click handler
+  const handlePHUpvote = () => {
+    if (hasUpvoted) {
+      setMockUpvotes(prev => prev - 1);
+      setHasUpvoted(false);
+    } else {
+      setMockUpvotes(prev => prev + 1);
+      setHasUpvoted(true);
+      setSpawnSparkles(true);
+      setTimeout(() => setSpawnSparkles(false), 1200);
+    }
+  };
 
-        <div className="w-full max-w-md bg-slate-900/65 border border-slate-800/80 backdrop-blur-3xl p-8 rounded-3xl shadow-2xl relative z-10 flex flex-col gap-6">
-          <div className="text-center flex flex-col gap-2">
-            <h1 className="text-2xl font-extrabold tracking-tight text-white">
-              Trading Intelligence <span className="font-extralight text-indigo-400">Platform</span>
-            </h1>
-            <p className="text-xs text-slate-400">
-              {authMode === "login"
-                ? "Enter your credentials to access live quant telemetry feeds"
-                : "Register a secure user account to start monitoring and paper trading"}
+  // Render unauthenticated Marketing & Product Hunt Showcase Landing Page
+  if (!token) {
+    // Generate beautiful live-ticking SVG spline chart points for the sandboxed terminal mockup
+    const maxMock = Math.max(...mockHistory);
+    const minMock = Math.min(...mockHistory);
+    const rangeMock = maxMock - minMock || 2;
+    const svgWidth = 520;
+    const svgHeight = 220;
+    const svgPoints = mockHistory.map((val, idx) => {
+      const x = (idx / (mockHistory.length - 1)) * svgWidth;
+      const y = svgHeight - ((val - minMock) / rangeMock) * (svgHeight - 40) - 20;
+      return `${x},${y}`;
+    }).join(" ");
+
+    return (
+      <div className="relative min-h-screen bg-[#030712] text-slate-100 flex flex-col font-sans overflow-x-hidden">
+        
+        {/* Futuristic Cyber Glimmer Background spheres */}
+        <div className="absolute top-[-10vw] right-[-15vw] w-[50vw] h-[50vw] rounded-full bg-indigo-650/10 blur-[130px] pointer-events-none z-0"></div>
+        <div className="absolute bottom-[-15vw] left-[-15vw] w-[50vw] h-[50vw] rounded-full bg-cyan-500/10 blur-[130px] pointer-events-none z-0"></div>
+        <div className="absolute top-[35vh] left-[25vw] w-[35vw] h-[35vw] rounded-full bg-purple-650/5 blur-[160px] pointer-events-none z-0"></div>
+
+        {/* --- PREMIUM STYLED NAV BAR --- */}
+        <nav className="sticky top-0 z-40 w-full bg-slate-950/60 border-b border-slate-900 backdrop-blur-xl transition-all duration-300">
+          <div className="max-w-[1440px] mx-auto px-6 h-18 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-650 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                <Flame size={20} className="text-white animate-pulse" />
+              </div>
+              <span className="text-lg font-black tracking-tight text-white flex items-center gap-1.5">
+                QUANT<span className="font-light text-indigo-400">INTELLIGENCE</span>
+              </span>
+            </div>
+
+            {/* Nav Menu */}
+            <div className="hidden md:flex items-center gap-8 text-xs uppercase tracking-wider font-bold text-slate-400">
+              <a href="#features" className="hover:text-indigo-400 transition-colors">Key Engines</a>
+              <a href="#sandbox" className="hover:text-indigo-400 transition-colors">Sandbox Terminal</a>
+              <a href="#upvotes" className="hover:text-indigo-400 transition-colors">Community</a>
+            </div>
+
+            {/* PH Launch and CTA */}
+            <div className="flex items-center gap-4">
+              <div className="hidden sm:flex items-center gap-2 bg-[#ff5722]/10 border border-[#ff5722]/20 px-3.5 py-1.5 rounded-full text-xs font-extrabold text-[#ff5722] hover:bg-[#ff5722]/15 transition-all">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#ff5722] animate-ping" />
+                PRODUCT HUNT #1
+              </div>
+              <button
+                onClick={() => {
+                  setAuthError("");
+                  setAuthMode("login");
+                  setShowAuthModal(true);
+                }}
+                className="px-5 py-2.5 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white rounded-xl font-bold text-xs tracking-wide uppercase transition-all hover:scale-[1.03] shadow-lg shadow-indigo-500/20 active:scale-[0.98] cursor-pointer"
+              >
+                Launch App
+              </button>
+            </div>
+          </div>
+        </nav>
+
+        {/* --- HERO SECTION --- */}
+        <section className="relative z-10 max-w-[1240px] mx-auto px-6 pt-16 md:pt-24 pb-12 flex flex-col items-center text-center gap-6">
+          
+          {/* Custom Shiny PH badge */}
+          <div className="inline-flex items-center gap-2.5 bg-gradient-to-r from-slate-900 to-slate-950 border border-slate-800/80 px-4 py-2 rounded-full text-xs font-bold text-slate-200 shadow-xl hover:border-indigo-500/30 transition-all select-none">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#ff5722] flex items-center justify-center text-[7px] text-white font-extrabold">▲</span>
+            Featured on Product Hunt
+            <span className="w-px h-3.5 bg-slate-800" />
+            <span className="text-[#ff5722] font-black uppercase tracking-wider">#1 Product of the Day</span>
+          </div>
+
+          {/* Epic Main Headline */}
+          <h1 className="text-4xl md:text-6xl lg:text-7xl font-extrabold tracking-tight text-white max-w-[980px] leading-[1.1] md:leading-[1.05]">
+            Supercharge Your Trading with <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent">AI Quant Signals</span>
+          </h1>
+
+          {/* Detailed persuasive subtext */}
+          <p className="text-sm md:text-lg text-slate-400 max-w-[760px] leading-relaxed font-light">
+            A high-performance algorithmic stream scanning multi-symbol market feeds in real-time. Guided by strict technical crossover filters (VWAP, RSI, STC) and optimized with deep OpenAI GPT-4o intelligence. 
+          </p>
+
+          {/* Dynamic Action Buttons */}
+          <div className="flex flex-wrap justify-center gap-4 mt-4">
+            <button
+              onClick={() => {
+                setAuthError("");
+                setAuthMode("register");
+                setShowAuthModal(true);
+              }}
+              className="px-8 py-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl font-extrabold text-sm tracking-wide uppercase transition-all shadow-xl shadow-indigo-500/20 hover:scale-[1.02] active:scale-[0.98] cursor-pointer flex items-center gap-2"
+            >
+              <Zap size={16} /> Get Started Free
+            </button>
+            <a
+              href="#sandbox"
+              className="px-8 py-4 bg-slate-900/60 hover:bg-slate-900/90 border border-slate-800 hover:border-slate-700 text-slate-200 rounded-2xl font-extrabold text-sm tracking-wide uppercase transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2"
+            >
+              Explore Live Sandbox
+            </a>
+          </div>
+
+          {/* Social Proof metrics */}
+          <div className="grid grid-cols-3 gap-6 md:gap-12 mt-12 p-6 border-t border-b border-slate-900 max-w-[680px] w-full font-mono">
+            <div className="flex flex-col gap-1 items-center">
+              <span className="text-2xl md:text-3xl font-black text-white">&lt; 5ms</span>
+              <span className="text-[10px] text-slate-500 uppercase tracking-widest">Signal Latency</span>
+            </div>
+            <div className="flex flex-col gap-1 items-center">
+              <span className="text-2xl md:text-3xl font-black text-indigo-400">98.4%</span>
+              <span className="text-[10px] text-slate-500 uppercase tracking-widest">Uptime Index</span>
+            </div>
+            <div className="flex flex-col gap-1 items-center">
+              <span className="text-2xl md:text-3xl font-black text-cyan-400">14k+</span>
+              <span className="text-[10px] text-slate-500 uppercase tracking-widest">Alerts Processed</span>
+            </div>
+          </div>
+        </section>
+
+        {/* --- LIVE MOCKUP SHOWCASE SANDBOX --- */}
+        <section id="sandbox" className="relative z-10 max-w-[1240px] mx-auto px-6 py-16 flex flex-col gap-10">
+          
+          <div className="flex flex-col items-center text-center gap-2">
+            <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white">
+              The Real-Time Sandboxed Console
+            </h2>
+            <p className="text-xs text-slate-450 max-w-[520px]">
+              Witness a live simulation of active stock volatility, technical charts, and GPT-4o analysis. Zero setup required.
             </p>
           </div>
 
-          <form onSubmit={handleAuthSubmit} className="flex flex-col gap-4">
-            {authError && (
-              <div className="p-3.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-xs font-mono text-center">
-                ⚠️ {authError}
-              </div>
-            )}
+          {/* High fidelity sandboxed dashboard layout */}
+          <div className="bg-slate-900/40 border border-slate-800/80 backdrop-blur-3xl p-4 md:p-6 rounded-3xl shadow-2xl flex flex-col gap-6 relative overflow-hidden">
+            
+            {/* Ambient inner glow */}
+            <div className="absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-indigo-500/25 to-transparent" />
 
-            <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Username</label>
-              <input
-                type="text"
-                required
-                value={usernameInput}
-                onChange={e => setUsernameInput(e.target.value)}
-                placeholder="quant_trader"
-                className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
-              />
+            {/* Sandbox Console Header */}
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 border-b border-slate-800/80">
+              <div className="flex items-center gap-3">
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                </span>
+                <div className="flex flex-col">
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">SANDBOX FEED</span>
+                  <span className="text-[10px] text-slate-500 font-mono">Ticking Multi-Symbol Stream Simulator</span>
+                </div>
+              </div>
+
+              {/* Badges strip */}
+              <div className="flex items-center gap-2">
+                <span className="bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 px-3 py-1 rounded-full text-[10px] font-mono tracking-wider">
+                  📡 SYSTEM ONLINE
+                </span>
+                <span className="bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 px-3 py-1 rounded-full text-[10px] font-mono tracking-wider">
+                  🤖 OPENAI CONNECTED
+                </span>
+              </div>
             </div>
 
-            {authMode === "register" && (
-              <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Email Address</label>
-                <input
-                  type="email"
-                  required
-                  value={emailInput}
-                  onChange={e => setEmailInput(e.target.value)}
-                  placeholder="trader@quant.bot"
-                  className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
-                />
-              </div>
-            )}
+            {/* Sandbox Dashboard Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-            <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Password</label>
-              <input
-                type="password"
-                required
-                value={passwordInput}
-                onChange={e => setPasswordInput(e.target.value)}
-                placeholder="••••••••••••"
-                className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
-              />
+              {/* Ticker Sidebar */}
+              <div className="flex flex-col gap-4 bg-slate-950/20 border border-slate-900 p-4 rounded-2xl">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Active Watchlist</span>
+                <div className="flex flex-col gap-2.5">
+                  {[
+                    { ticker: "TSLA", name: "Tesla Inc.", price: mockPrice, change: mockDiff === "up" ? "+1.85%" : "-1.12%" },
+                    { ticker: "NVDA", name: "Nvidia Corp.", price: 928.30, change: "+2.40%" },
+                    { ticker: "AMD", name: "Advanced Micro Devices", price: 174.15, change: "+0.80%" },
+                    { ticker: "SPX", name: "S&P 500 Index", price: 5240.20, change: "-0.22%" }
+                  ].map((x, i) => (
+                    <div key={i} className={`p-3 rounded-xl border flex justify-between items-center transition-all ${i === 0 ? "bg-indigo-500/5 border-indigo-500/30" : "bg-slate-950/40 border-slate-900"}`}>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-mono text-xs font-bold text-white">{x.ticker}</span>
+                        <span className="text-[9px] text-slate-500 font-mono">{x.name}</span>
+                      </div>
+                      <div className="flex flex-col items-end gap-0.5">
+                        <span className={`font-mono text-xs font-bold ${i === 0 ? (mockDiff === "up" ? "text-emerald-400 animate-pulse" : "text-rose-400 animate-pulse") : (x.change.startsWith("+") ? "text-emerald-400" : "text-rose-400")}`}>
+                          ${x.price.toFixed(2)}
+                        </span>
+                        <span className={`text-[9px] font-mono font-bold ${x.change.startsWith("+") ? "text-emerald-500" : "text-rose-500"}`}>
+                          {x.change}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Mock Interactive Spline Chart */}
+              <div className="flex flex-col gap-4 bg-slate-950/20 border border-slate-900 p-4 rounded-2xl lg:col-span-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">TSLA Technical Trend</span>
+                  <span className="text-[10px] font-mono text-indigo-400 flex items-center gap-1.5">
+                    <Activity size={10} className="animate-pulse" /> Live simulated spline (2s tick)
+                  </span>
+                </div>
+                
+                {/* SVG Live-ticking Spline Chart */}
+                <div className="h-[220px] bg-slate-950/50 rounded-xl relative border border-slate-900/50 overflow-hidden flex items-end">
+                  {/* Grid Lines */}
+                  <div className="absolute inset-0 grid grid-rows-4 pointer-events-none opacity-20">
+                    {[1, 2, 3].map(i => <div key={i} className="border-b border-slate-800 w-full" />)}
+                  </div>
+                  
+                  {/* Neon Spline */}
+                  <svg className="w-full h-full absolute inset-0 overflow-visible" preserveAspectRatio="none">
+                    <defs>
+                      <linearGradient id="splineGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stopColor="#6366f1" stopOpacity="0.4"/>
+                        <stop offset="100%" stopColor="#6366f1" stopOpacity="0.0"/>
+                      </linearGradient>
+                    </defs>
+                    {/* Area fill */}
+                    <path
+                      d={`M 0,220 L ${svgPoints} L 520,220 Z`}
+                      fill="url(#splineGrad)"
+                      className="transition-all duration-1000 ease-out"
+                    />
+                    {/* Line path */}
+                    <polyline
+                      fill="none"
+                      stroke="#818cf8"
+                      strokeWidth="2.5"
+                      points={svgPoints}
+                      className="transition-all duration-1000 ease-out"
+                    />
+                  </svg>
+
+                  {/* Pulsing indicator node */}
+                  <div 
+                    className="absolute w-3.5 h-3.5 rounded-full bg-indigo-400 border border-white flex items-center justify-center shadow-lg transition-all duration-1000 ease-out z-10"
+                    style={{
+                      right: '0.5%',
+                      bottom: `${((mockPrice - minMock) / rangeMock) * 80 + 10}%`,
+                      transform: 'translateY(50%)'
+                    }}
+                  >
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
+                  </div>
+                  
+                  {/* Ticking pricing floating overlay */}
+                  <div className="absolute top-3 left-3 bg-slate-950/80 border border-slate-800 px-3 py-1.5 rounded-lg flex items-center gap-2">
+                    <span className="text-[10px] text-slate-500 uppercase font-mono">Current Vol:</span>
+                    <span className={`text-xs font-mono font-black ${mockDiff === "up" ? "text-emerald-400" : "text-rose-400"}`}>
+                      ${mockPrice.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
             </div>
 
-            <button
-              type="submit"
-              disabled={isAuthLoading}
-              className="mt-2 w-full py-3 bg-indigo-500 hover:bg-indigo-600 disabled:bg-indigo-500/50 text-white rounded-xl font-semibold text-sm transition-colors shadow-lg flex items-center justify-center gap-2 cursor-pointer"
-            >
-              {isAuthLoading ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/35 border-t-white rounded-full animate-spin" />
-                  Processing...
-                </>
-              ) : authMode === "login" ? (
-                "Authenticate Session"
-              ) : (
-                "Create Quant Account"
-              )}
-            </button>
-          </form>
+            {/* Sandbox Bottom Banner GPT insights */}
+            <div className="p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl flex gap-3.5 items-start">
+              <div className="w-8 h-8 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center">
+                <Sparkles size={16} className="text-indigo-400 animate-pulse" />
+              </div>
+              <div className="flex flex-col gap-0.5 flex-1">
+                <span className="text-[9px] uppercase font-bold text-indigo-400 tracking-wider">GPT-4o Realtime Quant Analytics</span>
+                <p className="text-xs text-indigo-200 font-light italic leading-relaxed">
+                  "TSLA ticking upward at ${mockPrice.toFixed(2)}: Technical indicators show volume accumulation curling above standard VWAP baseline. RSI holding steady at 54, suggesting potential bullish continuation."
+                </p>
+              </div>
+            </div>
 
-          <div className="text-center text-xs text-slate-450">
-            {authMode === "login" ? (
-              <>
-                First time logging in?{" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("register");
-                    setAuthError("");
-                  }}
-                  className="text-indigo-400 hover:underline font-semibold cursor-pointer"
-                >
-                  Register an account
-                </button>
-              </>
-            ) : (
-              <>
-                Already have an active account?{" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("login");
-                    setAuthError("");
-                  }}
-                  className="text-indigo-400 hover:underline font-semibold cursor-pointer"
-                >
-                  Sign in here
-                </button>
-              </>
-            )}
           </div>
-        </div>
+        </section>
+
+        {/* --- SECTION: FEATURES / THE SIGNIFICANCE --- */}
+        <section id="features" className="relative z-10 max-w-[1240px] mx-auto px-6 py-16 border-t border-slate-900 flex flex-col gap-12">
+          
+          <div className="flex flex-col items-center text-center gap-2">
+            <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white">
+              The Architecture of Alpha
+            </h2>
+            <p className="text-xs text-slate-450 max-w-[520px]">
+              Engineered from the ground up for lightning fast analysis and bulletproof math crossovers.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            
+            {/* Feature 1 */}
+            <div className="p-6 bg-slate-900/30 border border-slate-900 hover:border-slate-800 rounded-2xl flex flex-col gap-4 backdrop-blur-md transition-all hover:scale-[1.01]">
+              <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                <Target size={20} />
+              </div>
+              <h3 className="text-sm font-extrabold uppercase text-white tracking-wider">Triple Crossover Logic</h3>
+              <p className="text-xs text-slate-400 leading-relaxed font-light">
+                No guesses. Our pipeline evaluates **VWAP, RSI, and STC (Schaff Trend Cycle)** simultaneously. Crossovers only trigger alerts when mathematical consensus is met.
+              </p>
+            </div>
+
+            {/* Feature 2 */}
+            <div className="p-6 bg-slate-900/30 border border-slate-900 hover:border-slate-800 rounded-2xl flex flex-col gap-4 backdrop-blur-md transition-all hover:scale-[1.01]">
+              <div className="w-10 h-10 rounded-xl bg-purple-550/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                <Cpu size={20} />
+              </div>
+              <h3 className="text-sm font-extrabold uppercase text-white tracking-wider">OpenAI GPT-4o Insights</h3>
+              <p className="text-xs text-slate-400 leading-relaxed font-light">
+                Contextual analytics. GPT-4o intercepts mathematical crossovers and writes human-readable, qualitative summaries, charting trends and key levels automatically.
+              </p>
+            </div>
+
+            {/* Feature 3 */}
+            <div className="p-6 bg-slate-900/30 border border-slate-900 hover:border-slate-800 rounded-2xl flex flex-col gap-4 backdrop-blur-md transition-all hover:scale-[1.01]">
+              <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
+                <Bell size={20} />
+              </div>
+              <h3 className="text-sm font-extrabold uppercase text-white tracking-wider">Telegram Alert Dispatcher</h3>
+              <p className="text-xs text-slate-400 leading-relaxed font-light">
+                Instant delivery. Alerts dispatch immediately to a dedicated, high-performance Telegram channel with formatted entry levels, stop loss thresholds, and profit targets.
+              </p>
+            </div>
+
+          </div>
+        </section>
+
+        {/* --- PRODUCT HUNT COMMUNITY CORNER --- */}
+        <section id="upvotes" className="relative z-10 max-w-[1040px] mx-auto px-6 py-16 border-t border-slate-900 flex flex-col items-center gap-10">
+          
+          <div className="flex flex-col items-center text-center gap-2">
+            <h2 className="text-2xl md:text-3xl font-extrabold text-white tracking-tight">
+              Loved by the Quant Community
+            </h2>
+            <p className="text-xs text-slate-450 max-w-[500px]">
+              Launched live on Product Hunt. Join hundreds of quantitative analysts monitoring market feeds with zero lag.
+            </p>
+          </div>
+
+          <div className="flex flex-col lg:flex-row gap-8 items-center justify-between w-full p-6 md:p-8 bg-slate-900/20 border border-slate-800/80 rounded-3xl backdrop-blur-2xl">
+            
+            {/* Interactive Upvotes section */}
+            <div className="flex flex-col gap-4 items-center text-center lg:items-start lg:text-left">
+              <span className="text-xs uppercase font-extrabold font-mono tracking-widest text-[#ff5722] flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-[#ff5722] animate-ping" /> Community Backed
+              </span>
+              <h3 className="text-xl font-bold text-white max-w-[380px]">
+                Support our daily pipeline launch with a single upvote!
+              </h3>
+              
+              {/* Product Hunt Upvote Button */}
+              <div className="relative mt-2">
+                <button
+                  onClick={handlePHUpvote}
+                  className={`px-8 py-4 rounded-2xl text-sm font-black tracking-wide uppercase transition-all shadow-xl hover:scale-[1.04] active:scale-[0.97] cursor-pointer flex items-center gap-3.5 select-none ${hasUpvoted ? "bg-[#ff5722] text-white shadow-[#ff5722]/15" : "bg-slate-900 hover:bg-slate-950 border border-slate-800 text-[#ff5722]"}`}
+                >
+                  <span className="text-lg">▲</span> UPVOTE
+                  <span className={`w-px h-4 ${hasUpvoted ? "bg-white/30" : "bg-slate-800"}`} />
+                  <span className={hasUpvoted ? "text-white" : "text-slate-200"}>{mockUpvotes}</span>
+                </button>
+
+                {/* Pop celebration sparkles */}
+                {spawnSparkles && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-2xl bg-[#ff5722] opacity-75"></span>
+                    <span className="absolute text-sm text-[#ff5722] -top-8 animate-bounce font-bold">✨ Upvoted! ✨</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Testimonials column */}
+            <div className="flex flex-col gap-4 max-w-[480px]">
+              
+              <div className="p-4 bg-slate-950/60 border border-slate-900 rounded-2xl flex flex-col gap-2 relative">
+                <div className="flex items-center justify-between text-[10px] font-mono text-slate-500">
+                  <span className="font-extrabold text-indigo-400">@quant_pro_dev</span>
+                  <span>Product Hunt Supporter</span>
+                </div>
+                <p className="text-xs text-slate-350 italic font-light leading-relaxed">
+                  "This tool is an absolute masterpiece for live monitoring! The real-time VWAP and RSI crossovers are insanely fast and the Telegram integration is rock solid."
+                </p>
+              </div>
+
+              <div className="p-4 bg-slate-950/60 border border-slate-900 rounded-2xl flex flex-col gap-2">
+                <div className="flex items-center justify-between text-[10px] font-mono text-slate-500">
+                  <span className="font-extrabold text-cyan-400">@algo_trader</span>
+                  <span>Beta Tester</span>
+                </div>
+                <p className="text-xs text-slate-350 italic font-light leading-relaxed">
+                  "Absolutely love the glassmorphism aesthetic. It feels premium and high-end, far removed from standard developer-coded tools. Exceptional UI/UX!"
+                </p>
+              </div>
+
+            </div>
+          </div>
+        </section>
+
+        {/* --- COMPACT SLEEK FOOTER --- */}
+        <footer className="mt-auto relative z-10 w-full bg-slate-950 border-t border-slate-900 py-6">
+          <div className="max-w-[1440px] mx-auto px-6 flex flex-col sm:flex-row justify-between items-center gap-4 text-[10px] font-mono text-slate-550 uppercase tracking-widest">
+            <span>&copy; 2026 QUANT INTELLIGENCE. ALL RIGHTS RESERVED.</span>
+            <div className="flex gap-4">
+              <a href="#features" className="hover:text-indigo-400">Privacy</a>
+              <span>·</span>
+              <a href="#sandbox" className="hover:text-indigo-400">Terms</a>
+            </div>
+          </div>
+        </footer>
+
+        {/* --- PREMIUM GLASSMORPHISM AUTH MODAL OVERLAY --- */}
+        {showAuthModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-2xl transition-all duration-300 animate-fade-in">
+            
+            {/* Modal Card */}
+            <div className="w-full max-w-md bg-slate-900/70 border border-slate-800/80 backdrop-blur-3xl p-8 rounded-3xl shadow-2xl relative z-10 flex flex-col gap-6 animate-slide-in">
+              
+              {/* Close Button */}
+              <button
+                onClick={() => setShowAuthModal(false)}
+                className="absolute top-4 right-4 p-2 rounded-xl bg-slate-950/30 hover:bg-rose-500/10 border border-slate-850/60 hover:border-rose-500/20 text-slate-400 hover:text-rose-400 transition-all cursor-pointer"
+              >
+                <X size={14} />
+              </button>
+
+              <div className="text-center flex flex-col gap-2">
+                <h1 className="text-2xl font-black tracking-tight text-white flex items-center justify-center gap-1.5">
+                  QUANT<span className="font-extralight text-indigo-400">CONSOLE</span>
+                </h1>
+                <p className="text-xs text-slate-450">
+                  {authMode === "login"
+                    ? "Authenticate session to connect live quant telemetry streams"
+                    : "Register your secure workspace account to start paper trading"}
+                </p>
+              </div>
+
+              <form onSubmit={handleAuthSubmit} className="flex flex-col gap-4">
+                
+                {/* Robust Validation Error Display */}
+                {authError && (
+                  <div className="p-3.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-xs font-mono text-center leading-relaxed">
+                    ⚠️ {authError}
+                  </div>
+                )}
+
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Username</label>
+                  <input
+                    type="text"
+                    required
+                    value={usernameInput}
+                    onChange={e => setUsernameInput(e.target.value)}
+                    placeholder="quant_trader"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                </div>
+
+                {authMode === "register" && (
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Email Address</label>
+                    <input
+                      type="email"
+                      required
+                      value={emailInput}
+                      onChange={e => setEmailInput(e.target.value)}
+                      placeholder="trader@quant.bot"
+                      className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+                )}
+
+                {/* Password field with Eye Toggle hide/show */}
+                <div className="flex flex-col gap-1.5 relative">
+                  <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Password</label>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    required
+                    value={passwordInput}
+                    onChange={e => setPasswordInput(e.target.value)}
+                    placeholder="••••••••••••"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-800/80 bg-slate-950/80 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3.5 bottom-3.5 text-slate-500 hover:text-slate-350 transition-colors cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isAuthLoading}
+                  className="mt-2 w-full py-3.5 bg-indigo-500 hover:bg-indigo-600 disabled:bg-indigo-500/50 text-white rounded-xl font-bold text-xs uppercase tracking-wide transition-all shadow-lg shadow-indigo-500/10 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isAuthLoading ? (
+                    <>
+                      <span className="w-4 h-4 border-2 border-white/35 border-t-white rounded-full animate-spin" />
+                      Authenticating Pipeline...
+                    </>
+                  ) : authMode === "login" ? (
+                    "Authorize Session"
+                  ) : (
+                    "Create Quant Account"
+                  )}
+                </button>
+              </form>
+
+              <div className="text-center text-xs text-slate-450 border-t border-slate-850 pt-4">
+                {authMode === "login" ? (
+                  <>
+                    First time logging in?{" "}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode("register");
+                        setAuthError("");
+                      }}
+                      className="text-indigo-400 hover:underline font-bold cursor-pointer"
+                    >
+                      Create secure account
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    Already have an active account?{" "}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode("login");
+                        setAuthError("");
+                      }}
+                      className="text-indigo-400 hover:underline font-bold cursor-pointer"
+                    >
+                      Sign in here
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     );
   }
@@ -749,10 +1250,11 @@ export default function Dashboard() {
   // Filter alerts specifically for selected active symbol
   const activeAlerts = signals.filter(s => s.symbol === selectedSymbol);
 
+  // Render Premium Dashboard for authenticated users
   return (
     <div className="flex-1 relative overflow-hidden min-h-screen pb-12 bg-[#020617]">
 
-      {/* Cybernetic Orbs */}
+      {/* Futuristic cyber spotlights */}
       <div className="absolute top-[-12vw] right-[-8vw] w-[50vw] h-[50vw] rounded-full bg-indigo-500 opacity-[0.14] blur-[150px] pointer-events-none"></div>
       <div className="absolute bottom-[-15vw] left-[-10vw] w-[50vw] h-[50vw] rounded-full bg-cyan-400 opacity-[0.12] blur-[150px] pointer-events-none"></div>
 
@@ -848,7 +1350,7 @@ export default function Dashboard() {
         {/* Dashboard Grid Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
 
-          {/* Watchlist Sidebar Column (New Feature!) */}
+          {/* Watchlist Sidebar Column */}
           <section className="bg-slate-900/65 border border-slate-800/80 rounded-3xl shadow-2xl flex flex-col p-6 gap-5 backdrop-blur-3xl lg:col-span-1">
             <div className="flex flex-col gap-1.5">
               <h2 className="text-md font-semibold text-slate-100 flex items-center gap-2">
@@ -1034,7 +1536,7 @@ export default function Dashboard() {
                       <span className="text-[10px] font-mono text-slate-400">{new Date(sig.timestamp * 1000).toLocaleTimeString()}</span>
                     </div>
 
-                    {/* Formatted Slack Alert code snippet */}
+                    {/* Message snippet */}
                     <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-lg">
                       <div className="text-[11px] font-mono text-slate-300 whitespace-pre-wrap select-all leading-relaxed break-all">
                         {sig.message}
