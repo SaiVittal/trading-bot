@@ -20,10 +20,6 @@ import {
   EyeOff,
   X,
   Zap,
-  Shield,
-  MessageSquare,
-  Share2,
-  ChevronRight,
   Flame
 } from "lucide-react";
 
@@ -968,7 +964,7 @@ export default function Dashboard() {
               <div className="flex flex-col gap-0.5 flex-1">
                 <span className="text-[9px] uppercase font-bold text-indigo-400 tracking-wider">GPT-4o Realtime Quant Analytics</span>
                 <p className="text-xs text-indigo-200 font-light italic leading-relaxed">
-                  "TSLA ticking upward at ${mockPrice.toFixed(2)}: Technical indicators show volume accumulation curling above standard VWAP baseline. RSI holding steady at 54, suggesting potential bullish continuation."
+                  {`"TSLA ticking upward at $${mockPrice.toFixed(2)}: Technical indicators show volume accumulation curling above standard VWAP baseline. RSI holding steady at 54, suggesting potential bullish continuation."`}
                 </p>
               </div>
             </div>
@@ -1079,7 +1075,7 @@ export default function Dashboard() {
                   <span>Product Hunt Supporter</span>
                 </div>
                 <p className="text-xs text-slate-350 italic font-light leading-relaxed">
-                  "This tool is an absolute masterpiece for live monitoring! The real-time VWAP and RSI crossovers are insanely fast and the Telegram integration is rock solid."
+                  {"\"This tool is an absolute masterpiece for live monitoring! The real-time VWAP and RSI crossovers are insanely fast and the Telegram integration is rock solid.\""}
                 </p>
               </div>
 
@@ -1089,7 +1085,7 @@ export default function Dashboard() {
                   <span>Beta Tester</span>
                 </div>
                 <p className="text-xs text-slate-350 italic font-light leading-relaxed">
-                  "Absolutely love the glassmorphism aesthetic. It feels premium and high-end, far removed from standard developer-coded tools. Exceptional UI/UX!"
+                  {"\"Absolutely love the glassmorphism aesthetic. It feels premium and high-end, far removed from standard developer-coded tools. Exceptional UI/UX!\""}
                 </p>
               </div>
 
