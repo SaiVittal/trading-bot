@@ -129,16 +129,16 @@ export default function Dashboard() {
       const lastClosed = filteredClosed[filteredClosed.length - 1];
       Promise.resolve().then(() => setCurrentPrice(lastClosed.close));
       currentPriceRef.current = lastClosed.close;
-      setActiveCandle({
+      Promise.resolve().then(() => setActiveCandle({
         symbol: selectedSymbol, open: 0, high: 0, low: 0, close: 0, volume: 0, timestamp: 0
-      });
+      }));
     } else {
       const livePrice = watchlistPrices[selectedSymbol] || 0;
       Promise.resolve().then(() => setCurrentPrice(livePrice));
       currentPriceRef.current = livePrice;
-      setActiveCandle({
+      Promise.resolve().then(() => setActiveCandle({
         symbol: selectedSymbol, open: 0, high: 0, low: 0, close: 0, volume: 0, timestamp: 0
-      });
+      }));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSymbol, token]);
