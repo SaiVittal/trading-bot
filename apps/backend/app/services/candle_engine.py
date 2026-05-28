@@ -41,9 +41,9 @@ REDIS_CANDLE_CHANNEL = "market:candles"
 REDIS_ALERT_CHANNEL  = "signals:alerts"
 REDIS_CONTROL_CHANNEL = "market:control"
 
-# ── Candle accumulation ────────────────────────────────────────
-CANDLE_WINDOW_SECS  = 5
-CANDLE_HISTORY_SIZE = 1440   # 2 h of 5-second candles
+# ── Candle accumulation (values come from Settings / env vars) ─
+CANDLE_WINDOW_SECS  = settings.CANDLE_WINDOW_SECS
+CANDLE_HISTORY_SIZE = settings.CANDLE_HISTORY_SIZE
 
 # ── Session time (ET) ─────────────────────────────────────────
 ET = pytz.timezone("America/New_York")
@@ -124,8 +124,12 @@ class RealtimeCandleEngine:
         self._risk       = RiskEngine()
         self._insight    = InsightGenerator()
         self._formatter  = AlertFormatter()
-        self._od_module      = OpeningDriveModule(min_confidence=55, min_rvol=1.5, min_gap_pct=0.5)
-        self._sr_module      = SRStrategyModule(min_confidence=55)
+        self._od_module      = OpeningDriveModule(
+            min_confidence=settings.OD_MIN_CONFIDENCE,
+            min_rvol=settings.OD_MIN_RVOL,
+            min_gap_pct=settings.OD_MIN_GAP_PCT,
+        )
+        self._sr_module      = SRStrategyModule(min_confidence=settings.SR_MIN_CONFIDENCE)
         self.prior_closes:   Dict[str, float] = {}   # symbol → prior session close
         self.session_dates:  Dict[str, object] = {}  # symbol → last seen date
         self.prior_day_data: Dict[str, dict] = {}    # symbol → {high, low, close} of prior session
@@ -291,10 +295,9 @@ class RealtimeCandleEngine:
     # ──────────────────────────────────────────────────────────────
 
     async def evaluate_strategy_checklist(self, symbol: str) -> None:
-        # Require ≥120 closed candles (≈10 minutes of data) before signalling —
-        # avoids false triggers from thin early-session history.
+        # Require sufficient candle history before signalling (config: MIN_CANDLE_HISTORY).
         _hist = self.closed_candles_history.get(symbol)
-        if not _hist or len(_hist) < 120:
+        if not _hist or len(_hist) < settings.MIN_CANDLE_HISTORY:
             return
 
         df_raw = self._build_dataframe(symbol)
@@ -381,15 +384,18 @@ class RealtimeCandleEngine:
             bear      = 1 if direction == "bearish" else 0
             top       = self._make_top_from_specialty(best_spec)
 
-        # ── Consensus gate ────────────────────────────────────────
-        # Require 2+ strategies agreeing OR a single strategy with ≥78 confidence.
-        # Specialty-only alerts (Opening Drive / S/R) are exempt — they carry their
-        # own confidence thresholds set at scanner level (≥55).
+        # ── Consensus gate (config: CONSENSUS_MIN_STRATEGIES / CONSENSUS_SINGLE_MIN_CONF)
+        # Specialty-only alerts (Opening Drive / S/R) are exempt.
         if filtered and not (od_signals or sr_signals):
-            if len(signals) < 2 and top.confidence < 78:
+            if (
+                len(signals) < settings.CONSENSUS_MIN_STRATEGIES
+                and top.confidence < settings.CONSENSUS_SINGLE_MIN_CONF
+            ):
                 logger.info(
                     f"{symbol}: consensus gate — {len(signals)} strategy @ "
-                    f"{top.confidence}/100 (need 2+ or ≥78 conf). Suppressed."
+                    f"{top.confidence}/100 "
+                    f"(need {settings.CONSENSUS_MIN_STRATEGIES}+ or "
+                    f"≥{settings.CONSENSUS_SINGLE_MIN_CONF} conf). Suppressed."
                 )
                 return
 
@@ -423,39 +429,43 @@ class RealtimeCandleEngine:
             )
             return
 
-        # ── Direction lock ────────────────────────────────────────
-        # After a BUY alert, a SELL alert needs strong conviction to fire
-        # (prevents flip-flopping that confuses traders).
+        # ── Direction lock (config: REVERSAL_MIN_STRATEGIES / REVERSAL_MIN_CONF) ──
         if redis_client.client:
             try:
-                dir_key = f"alert:last_direction:{symbol}"
+                dir_key  = f"alert:last_direction:{symbol}"
                 last_dir = await redis_client.client.get(dir_key)
                 if last_dir and last_dir != direction:
-                    if len(signals) < 3 and top.confidence < 75:
+                    if (
+                        len(signals) < settings.REVERSAL_MIN_STRATEGIES
+                        and top.confidence < settings.REVERSAL_MIN_CONF
+                    ):
                         logger.info(
                             f"{symbol}: direction reversal {last_dir}→{direction} suppressed "
-                            f"(need 3+ strategies or ≥75 conf, got {len(signals)} @ {top.confidence})."
+                            f"(need {settings.REVERSAL_MIN_STRATEGIES}+ strategies or "
+                            f"≥{settings.REVERSAL_MIN_CONF} conf, "
+                            f"got {len(signals)} @ {top.confidence})."
                         )
                         return
             except Exception:
                 pass
 
-        # ── Global rate limiter ───────────────────────────────────
-        # Allow at most 4 Telegram pushes per 10-minute window across all symbols.
-        # Prevents simultaneous multi-symbol bursts from flooding the channel.
+        # ── Global rate limiter (config: RATE_LIMIT_WINDOW_SECS / RATE_LIMIT_MAX_ALERTS) ─
         if redis_client.client:
             try:
-                rate_bucket = int(now_sec // 600)          # new bucket every 10 min
+                rate_bucket = int(now_sec // settings.RATE_LIMIT_WINDOW_SECS)
                 rate_key    = f"alerts:global_rate:{rate_bucket}"
                 rate_count  = await redis_client.client.incr(rate_key)
                 if rate_count == 1:
-                    await redis_client.client.expire(rate_key, 700)  # slightly longer than window
-                if rate_count > 4:
+                    # TTL slightly longer than the window so key outlives the bucket boundary
+                    await redis_client.client.expire(
+                        rate_key, settings.RATE_LIMIT_WINDOW_SECS + 60
+                    )
+                if rate_count > settings.RATE_LIMIT_MAX_ALERTS:
                     logger.info(
-                        f"Global rate limit: {rate_count} alerts in 10-min window — "
+                        f"Global rate limit: {rate_count} alerts in "
+                        f"{settings.RATE_LIMIT_WINDOW_SECS}s window — "
                         f"suppressing {symbol}."
                     )
-                    # Undo increment so remaining alerts in window can use the slot
                     await redis_client.client.decr(rate_key)
                     return
             except Exception:
@@ -707,7 +717,7 @@ class RealtimeCandleEngine:
         )
         try:
             resp    = await self._openai.chat.completions.create(
-                model="gpt-4o",
+                model=settings.OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": "Professional quant trader writing concise signal insights."},
                     {"role": "user",   "content": prompt},

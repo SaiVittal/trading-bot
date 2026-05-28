@@ -53,18 +53,20 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # 2. Seed a default administrator user if users table is empty
+    # 2. Seed a default administrator user if users table is empty.
+    #    Credentials come from env vars (ADMIN_USERNAME / ADMIN_PASSWORD).
+    from app.core.config import settings as _settings
     async with async_session() as session:
         try:
             stmt = select(User).limit(1)
             result = await session.execute(stmt)
             if not result.scalar_one_or_none():
                 admin_user = User(
-                    username="admin",
-                    email="admin@tradingplatform.local",
-                    hashed_password=get_password_hash("adminpass123"),
+                    username=_settings.ADMIN_USERNAME,
+                    email=_settings.ADMIN_EMAIL,
+                    hashed_password=get_password_hash(_settings.ADMIN_PASSWORD),
                     role="admin",
-                    is_active=True
+                    is_active=True,
                 )
                 session.add(admin_user)
                 await session.commit()

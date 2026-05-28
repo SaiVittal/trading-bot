@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Float, DateTime, Boolean
+from sqlalchemy import String, Float, DateTime, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 def utc_now_naive() -> datetime:
@@ -36,6 +36,20 @@ class TradingSignal(Base):
     status: Mapped[str] = mapped_column(String(50), default="generated", nullable=False)  # generated, risk_validated, rejected, alert_sent
     rejection_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive, index=True, nullable=False)
+
+class UserWatchlist(Base):
+    __tablename__ = "user_watchlists"
+    __table_args__ = (
+        UniqueConstraint("user_id", "symbol", name="uq_user_symbol"),
+    )
+
+    id:       Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id:  Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    symbol:   Mapped[str]      = mapped_column(String(20), nullable=False)
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive, nullable=False)
+
 
 class Trade(Base):
     __tablename__ = "trades"

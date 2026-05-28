@@ -70,9 +70,7 @@ def _parse_alpaca_ts(ts_str: str) -> float:
 
 class MarketFeedManager:
     def __init__(self) -> None:
-        self.watchlist: Set[str] = {
-            "TSLA", "NBIS", "COST", "SPX", "APPLOVIN"
-        }
+        self.watchlist: Set[str] = set(settings.DEFAULT_WATCHLIST_SYMBOLS)
         self.last_message_time: float = time.time()
 
         env = os.getenv("APP_ENV") or settings.ENV
@@ -92,6 +90,9 @@ class MarketFeedManager:
             "feed":   f"alpaca-{settings.ALPACA_FEED}" if settings.ALPACA_API_KEY else "simulation",
             "error":  error,
             "timestamp": time.time(),
+            # Publish thresholds so frontend can sync without hardcoding
+            "stale_threshold_market_hours_ms": int(settings.FEED_STALE_MARKET_HOURS_SECS * 1000),
+            "stale_threshold_off_hours_ms":    int(settings.FEED_STALE_OFF_HOURS_SECS    * 1000),
         }
         logger.info(
             f"Market Feed status → {status.upper()} "
@@ -184,7 +185,7 @@ class MarketFeedManager:
                             if action == "add" and sym and sym not in self.watchlist:
                                 self.watchlist.add(sym)
                                 if self.redis:
-                                    await self.redis.sadd("watchlist:symbols", sym)
+                                    await self.redis.sadd("watchlist:global:symbols", sym)
                                 await ws.send(json.dumps({
                                     "action": "subscribe",
                                     "trades": [sym],
@@ -193,7 +194,7 @@ class MarketFeedManager:
                             elif action == "remove" and sym and sym in self.watchlist:
                                 self.watchlist.discard(sym)
                                 if self.redis:
-                                    await self.redis.srem("watchlist:symbols", sym)
+                                    await self.redis.srem("watchlist:global:symbols", sym)
                                 await ws.send(json.dumps({
                                     "action": "unsubscribe",
                                     "trades": [sym],
@@ -208,7 +209,11 @@ class MarketFeedManager:
                     while True:
                         await asyncio.sleep(10.0)
                         is_active = is_market_hours()
-                        threshold = 45.0 if is_active else 1800.0
+                        threshold = (
+                            settings.FEED_STALE_MARKET_HOURS_SECS
+                            if is_active
+                            else settings.FEED_STALE_OFF_HOURS_SECS
+                        )
                         elapsed   = time.time() - self.last_message_time
                         if elapsed > threshold:
                             logger.warning(
@@ -305,7 +310,7 @@ class MarketFeedManager:
                         if action == "add" and sym and sym not in self.watchlist:
                             self.watchlist.add(sym)
                             if self.redis:
-                                await self.redis.sadd("watchlist:symbols", sym)
+                                await self.redis.sadd("watchlist:global:symbols", sym)
                             prices[sym] = get_seed_price(sym)
                             logger.info(
                                 f"Simulation: added {sym} @ ${prices[sym]}"
@@ -313,7 +318,7 @@ class MarketFeedManager:
                         elif action == "remove" and sym and sym in self.watchlist:
                             self.watchlist.discard(sym)
                             if self.redis:
-                                await self.redis.srem("watchlist:symbols", sym)
+                                await self.redis.srem("watchlist:global:symbols", sym)
                             prices.pop(sym, None)
                             logger.info(f"Simulation: removed {sym}")
                 except (asyncio.CancelledError, Exception):
@@ -365,14 +370,14 @@ class MarketFeedManager:
         # Restore persistent watchlist from Redis
         if self.redis:
             try:
-                stored = await self.redis.smembers("watchlist:symbols")
+                stored = await self.redis.smembers("watchlist:global:symbols")
                 if stored:
                     self.watchlist = {s for s in stored if s}
                     logger.info(
                         f"Loaded persistent watchlist from Redis: {list(self.watchlist)}"
                     )
                 else:
-                    await self.redis.sadd("watchlist:symbols", *self.watchlist)
+                    await self.redis.sadd("watchlist:global:symbols", *self.watchlist)
                     logger.info(
                         f"Seeded default watchlist to Redis: {list(self.watchlist)}"
                     )

@@ -79,7 +79,7 @@ async def get_recent_signals_redis(
             return [json.loads(r) for r in raw]
 
         # No symbol filter — fetch across all watchlist symbols
-        watchlist_raw = await client.smembers("watchlist:symbols")
+        watchlist_raw = await client.smembers("watchlist:global:symbols")
         all_alerts: List[Dict] = []
         seen: set = set()
         for sym in watchlist_raw:

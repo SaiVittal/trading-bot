@@ -103,6 +103,16 @@ export default function Dashboard() {
   const [hasUpvoted, setHasUpvoted] = useState(false);
   const [spawnSparkles, setSpawnSparkles] = useState(false);
 
+  // Shared base URL for all API calls
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // Stale-data thresholds synced from backend market:status message (ms).
+  // Defaults match backend Settings defaults until a status message arrives.
+  const staleThresholdRef = useRef<{ marketHours: number; offHours: number }>({
+    marketHours: 45_000,
+    offHours:    1_800_000,
+  });
+
   // State variables
   const [, setConnected] = useState(false);
   const [wsStatus, setWsStatus] = useState<"CONNECTING" | "CONNECTED" | "RECONNECTING" | "DISCONNECTED" | "STALE_DATA">("CONNECTING");
@@ -157,17 +167,7 @@ export default function Dashboard() {
         Promise.resolve().then(() => setToken(savedToken));
       }
       
-      const savedWatchlist = localStorage.getItem("watchlist");
-      if (savedWatchlist) {
-        try {
-          const parsed = JSON.parse(savedWatchlist);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            Promise.resolve().then(() => setWatchlist(parsed));
-          }
-        } catch (e) {
-          console.error("Failed to parse watchlist from localStorage:", e);
-        }
-      }
+      // Watchlist is now server-side (DB + Redis) — no localStorage needed
     }
   }, []);
 
@@ -249,7 +249,6 @@ export default function Dashboard() {
   useEffect(() => {
     if (!token) return;
     const fetchTelegramStatus = async () => {
-      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       try {
         const response = await fetch(`${apiBaseUrl}/api/v1/alerts/telegram/status`, {
           headers: { "Authorization": `Bearer ${token}` }
@@ -265,14 +264,34 @@ export default function Dashboard() {
     fetchTelegramStatus();
   }, [token]);
 
-  // Fetch recent signals from REST API on login to populate signal panel immediately
+  // On login: load user-specific watchlist from DB, then recent signals
   useEffect(() => {
     if (!token) return;
+
+    const fetchWatchlist = async () => {
+      try {
+        const res = await fetch(`${apiBaseUrl}/api/v1/watchlist`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const symbols: string[] = (data.items ?? []).map((i: { symbol: string }) => i.symbol);
+          if (symbols.length > 0) {
+            setWatchlist(symbols);
+            // Keep selected symbol valid
+            setSelectedSymbol(prev => (symbols.includes(prev) ? prev : symbols[0]));
+            logSystem(`[REST] Loaded watchlist: ${symbols.join(", ")}`, "system");
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch watchlist", e);
+      }
+    };
+
     const fetchRecentSignals = async () => {
-      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       try {
         const res = await fetch(`${apiBaseUrl}/api/v1/alerts/signals/recent?limit=15`, {
-          headers: { "Authorization": `Bearer ${token}` }
+          headers: { Authorization: `Bearer ${token}` },
         });
         if (res.ok) {
           const data: AlertData[] = await res.json();
@@ -287,7 +306,9 @@ export default function Dashboard() {
         console.error("Failed to fetch recent signals", e);
       }
     };
-    fetchRecentSignals();
+
+    // Load watchlist first so the correct symbols are ready before WS connects
+    fetchWatchlist().then(() => fetchRecentSignals());
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
@@ -296,7 +317,6 @@ export default function Dashboard() {
     const nextState = !telegramAlertsEnabled;
     setTelegramAlertsEnabled(nextState);
 
-    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     try {
       const response = await fetch(`${apiBaseUrl}/api/v1/alerts/telegram/toggle`, {
         method: "POST",
@@ -323,8 +343,6 @@ export default function Dashboard() {
     e.preventDefault();
     setAuthError("");
     setIsAuthLoading(true);
-
-    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
     try {
       if (authMode === "login") {
@@ -440,7 +458,9 @@ export default function Dashboard() {
       wsRef.current.close();
       wsRef.current = null;
     }
-    // Clear all session-scoped state and refs
+    // Clear all session-scoped state and refs — watchlist reloads from DB on next login
+    setWatchlist([]);
+    setSelectedSymbol("TSLA");
     setWatchlistPrices({});
     setSignals([]);
     setClosedCandles([]);
@@ -477,56 +497,64 @@ export default function Dashboard() {
     setTimeout(() => setActiveToast(prev => prev?.id === id ? null : prev), 5000);
   };
 
+  // ── Watchlist REST API helpers ────────────────────────────────
+  const watchlistApi = async (method: "POST" | "DELETE", symbol: string) => {
+    if (!token) return;
+    try {
+      await fetch(`${apiBaseUrl}/api/v1/watchlist/${encodeURIComponent(symbol)}`, {
+        method,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (e) {
+      logSystem(`Watchlist API error (${method} ${symbol}): ${e}`, "error");
+    }
+  };
+
   // Dynamic Ticker Searched Subscription hook
-  const handleSearchSubscribe = (e?: React.FormEvent) => {
+  const handleSearchSubscribe = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const symbol = searchInput.toUpperCase().trim();
     if (!symbol) return;
 
-    // 1. Add to local watchlist state if missing
+    // 1. Persist to DB via REST API (backend updates Redis + market feed)
+    await watchlistApi("POST", symbol);
+
+    // 2. Optimistic UI update while waiting for watchlist:sync confirmation
     if (!watchlist.includes(symbol)) {
-      const updated = [...watchlist, symbol];
-      setWatchlist(updated);
-      if (typeof window !== "undefined") {
-        localStorage.setItem("watchlist", JSON.stringify(updated));
-      }
+      setWatchlist(prev => [...prev, symbol]);
     }
 
-    // 2. Switch main view focus to searched asset
+    // 3. Switch main view focus to searched asset
     setSelectedSymbol(symbol);
     setSearchInput("");
 
-    // 3. Emit subscription signal over standard WebSocket connection
+    // 4. Also signal via WebSocket so backend sends candle/alert history for new symbol
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "search", symbol }));
-      logSystem(`Subscribing to real-time ticker stream for searched asset: ${symbol}`, "system");
-    } else {
-      logSystem(`Cannot send subscription request. WebSockets offline. Ticker locally added.`, "error");
+      logSystem(`Subscribed to real-time stream for: ${symbol}`, "system");
     }
   };
 
-  const handleRemoveSymbol = (sym: string, e: React.MouseEvent) => {
-    e.stopPropagation(); // Avoid triggering selected symbol change
-    if (sym === "TSLA" && watchlist.length === 1) return; // Prevent empty watchlist
+  const handleRemoveSymbol = async (sym: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (watchlist.length === 1) return; // Keep at least one symbol
 
+    // 1. Optimistic UI update
     const updated = watchlist.filter(s => s !== sym);
     setWatchlist(updated);
-    if (typeof window !== "undefined") {
-      localStorage.setItem("watchlist", JSON.stringify(updated));
-    }
 
     if (selectedSymbol === sym) {
       setSelectedSymbol(updated[0] || "TSLA");
     }
 
-    // Emit remove signal over standard WebSocket connection
+    // 2. Persist removal to DB via REST API
+    await watchlistApi("DELETE", sym);
+
+    // 3. Signal WebSocket for real-time unsubscription
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "remove", symbol: sym }));
-      logSystem(`Unsubscribing from ticker stream for asset: ${sym}`, "system");
-    } else {
-      logSystem(`Cannot send unsubscribe request. WebSockets offline. Ticker locally removed.`, "error");
     }
-    logSystem(`Removed asset ${sym} from local workspace watchlist.`, "system");
+    logSystem(`Removed ${sym} from watchlist.`, "system");
   };
 
   // WebSockets client implementation
@@ -556,9 +584,12 @@ export default function Dashboard() {
         }
         wsUrl = url;
       } else {
-        const wsProtocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss" : "ws";
-        const wsHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
-        wsUrl = `${wsProtocol}://${wsHost}:8000/api/v1/ws`;
+        // Derive WS URL from apiBaseUrl — avoids hardcoded port 8000
+        const wsBase = apiBaseUrl
+          .replace(/^https:\/\//, "wss://")
+          .replace(/^http:\/\//, "ws://")
+          .replace(/\/$/, "");
+        wsUrl = `${wsBase}/api/v1/ws`;
       }
 
       // Secure connection by appending user's JWT access token
@@ -694,13 +725,25 @@ export default function Dashboard() {
 
           } else if (channel === "watchlist:sync") {
             const symbols = data as string[];
-            setWatchlist(symbols);
-            if (typeof window !== "undefined") {
-              localStorage.setItem("watchlist", JSON.stringify(symbols));
+            // Authoritative sync from DB — replace optimistic UI state
+            if (Array.isArray(symbols) && symbols.length > 0) {
+              setWatchlist(symbols);
+              setSelectedSymbol(prev => (symbols.includes(prev) ? prev : symbols[0]));
             }
-            logSystem(`Synced persistent watchlist from backend: ${symbols.join(", ")}`, "system");
+            logSystem(`Watchlist synced from server: ${symbols.join(", ")}`, "system");
           } else if (channel === "market:status") {
-            const statusData = data as { status: string; feed: string; error?: string };
+            const statusData = data as {
+              status: string; feed: string; error?: string;
+              stale_threshold_market_hours_ms?: number;
+              stale_threshold_off_hours_ms?:    number;
+            };
+            // Sync stale-detection thresholds from backend config
+            if (statusData.stale_threshold_market_hours_ms) {
+              staleThresholdRef.current.marketHours = statusData.stale_threshold_market_hours_ms;
+            }
+            if (statusData.stale_threshold_off_hours_ms) {
+              staleThresholdRef.current.offHours = statusData.stale_threshold_off_hours_ms;
+            }
             logSystem(`[FEED STATUS] Source: ${statusData.feed} | Status: ${statusData.status.toUpperCase()} ${statusData.error ? '| Info: ' + statusData.error : ''}`, "system");
             
             if (statusData.status === "connecting") {
@@ -755,7 +798,9 @@ export default function Dashboard() {
     const staleCheckInterval = setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         const elapsed = Date.now() - lastTickTimeRef.current;
-        const threshold = isMarketHours() ? 45000 : 300000;
+        const threshold = isMarketHours()
+          ? staleThresholdRef.current.marketHours
+          : staleThresholdRef.current.offHours;
         if (elapsed > threshold) {
           updateWsStatus("STALE_DATA");
         } else if (wsStatusRef.current === "STALE_DATA" && elapsed <= threshold) {
