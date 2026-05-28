@@ -565,19 +565,45 @@ export default function Dashboard() {
     let reconnectTimeout: NodeJS.Timeout;
     let pingInterval: NodeJS.Timeout;
     let reconnectAttempts = 0;
+    // Prevents onclose from scheduling a reconnect after intentional cleanup
+    let destroyed = false;
+    // Prevents onerror + onclose from both scheduling a reconnect
+    let reconnectPending = false;
+
+    // Exponential backoff with jitter: 1s, 2s, 4s, 8s … capped at 30s
+    // Jitter spreads clients so they don't all hammer the server at once after a restart
+    const backoffMs = (attempt: number) => {
+      const base = Math.min(1000 * Math.pow(2, attempt), 30000);
+      const jitter = Math.random() * 1000;
+      return Math.floor(base + jitter);
+    };
+
+    const scheduleReconnect = () => {
+      if (destroyed || reconnectPending) return;
+      reconnectPending = true;
+      const delay = backoffMs(reconnectAttempts);
+      logSystem(
+        `WebSocket closed. Reconnecting in ${(delay / 1000).toFixed(1)}s… (attempt ${reconnectAttempts + 1})`,
+        reconnectAttempts === 0 ? "system" : "error",
+      );
+      reconnectTimeout = setTimeout(() => {
+        reconnectPending = false;
+        reconnectAttempts++;
+        connect();
+      }, delay);
+    };
 
     const connect = () => {
-      updateWsStatus("CONNECTING");
+      if (destroyed) return;
+      updateWsStatus(reconnectAttempts === 0 ? "CONNECTING" : "RECONNECTING");
+
       const envWsUrl = process.env.NEXT_PUBLIC_WS_URL;
       let wsUrl: string;
 
       if (envWsUrl) {
         let url = envWsUrl;
-        if (url.startsWith("http://")) {
-          url = url.replace("http://", "ws://");
-        } else if (url.startsWith("https://")) {
-          url = url.replace("https://", "wss://");
-        }
+        if (url.startsWith("http://")) url = url.replace("http://", "ws://");
+        else if (url.startsWith("https://")) url = url.replace("https://", "wss://");
         if (!url.includes("/api/v1/ws")) {
           const cleanUrl = url.endsWith("/") ? url.slice(0, -1) : url;
           url = `${cleanUrl}/api/v1/ws`;
@@ -592,24 +618,31 @@ export default function Dashboard() {
         wsUrl = `${wsBase}/api/v1/ws`;
       }
 
-      // Secure connection by appending user's JWT access token
-      const wsUrlWithToken = `${wsUrl}?token=${token}`;
-      ws = new WebSocket(wsUrlWithToken);
+      ws = new WebSocket(`${wsUrl}?token=${token}`);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (destroyed) { ws.close(); return; }
+        const wasReconnect = reconnectAttempts > 0;
         reconnectAttempts = 0;
+        reconnectPending  = false;
         setConnected(true);
         updateWsStatus("CONNECTED");
         lastTickTimeRef.current = Date.now();
-        logSystem("Standard WebSocket connection handshake successful. Feed bound to Redis.", "system");
+        logSystem(
+          wasReconnect
+            ? "WebSocket reconnected successfully. Feed restored."
+            : "WebSocket connected. Feed bound to Redis.",
+          "system",
+        );
 
-        // Active ping keepalive (every 15 seconds) to prevent Render container sleep
+        // Keepalive ping every 20 s — prevents Render/proxy idle timeout
+        clearInterval(pingInterval);
         pingInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "ping" }));
           }
-        }, 15000);
+        }, 20000);
       };
 
       ws.onmessage = (event) => {
@@ -763,21 +796,25 @@ export default function Dashboard() {
         }
       };
 
-      ws.onerror = () => {
-        logSystem("WebSocket socket connection error identified.", "error");
+      ws.onerror = (ev) => {
+        // onerror is always followed by onclose — log here, reconnect in onclose
+        logSystem(`WebSocket error (attempt ${reconnectAttempts + 1}): connection could not be established.`, "error");
+        void ev;
       };
 
-      ws.onclose = () => {
-        setConnected(false);
-        updateWsStatus("RECONNECTING");
-        logSystem("WebSocket pipeline detached. Starting backoff reconnect...", "error");
+      ws.onclose = (ev) => {
         clearInterval(pingInterval);
-
-        // Backoff reconnect
-        reconnectTimeout = setTimeout(() => {
-          reconnectAttempts++;
-          connect();
-        }, Math.min(1000 * reconnectAttempts + 1000, 10000));
+        setConnected(false);
+        // Code 1000 = normal closure (server restarted cleanly or logout)
+        // Code 1008 = auth failure — do NOT reconnect, token is invalid
+        if (destroyed) return;
+        if (ev.code === 1008) {
+          logSystem("WebSocket closed: authentication failed. Please log in again.", "error");
+          updateWsStatus("DISCONNECTED");
+          return;
+        }
+        updateWsStatus("RECONNECTING");
+        scheduleReconnect();
       };
     };
 
@@ -810,10 +847,11 @@ export default function Dashboard() {
     }, 5000);
 
     return () => {
-      if (ws) ws.close();
+      destroyed = true;                // stops onclose from scheduling another reconnect
       clearTimeout(reconnectTimeout);
       clearInterval(pingInterval);
       clearInterval(staleCheckInterval);
+      if (ws) ws.close(1000, "cleanup");
     };
   // wsStatus intentionally excluded: adding it to deps would restart the WS connection on every status change
   // eslint-disable-next-line react-hooks/exhaustive-deps
