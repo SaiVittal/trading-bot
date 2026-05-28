@@ -20,7 +20,8 @@ import {
   EyeOff,
   X,
   Zap,
-  Flame
+  Flame,
+  AlertTriangle
 } from "lucide-react";
 
 // Types
@@ -44,6 +45,7 @@ interface CandleData {
 interface AlertData {
   symbol: string;
   action: "BUY" | "SELL";
+  direction: "bullish" | "bearish";
   price: number;
   rsi: number;
   vwap: number;
@@ -51,6 +53,23 @@ interface AlertData {
   stop: number;
   t1: number;
   t2: number;
+  rr: number;
+  exit_price: number;
+  exit_note: string;
+  trade_type: string;
+  confidence: number;
+  confidence_label: string;
+  top_strategy: string;
+  top_strategy_name: string;
+  strategies_fired: string[];
+  strategy_names: string[];
+  consensus_bull: number;
+  consensus_bear: number;
+  conditions_met: string[];
+  vol_regime: string;
+  vol_rel: number;
+  patterns: string[];
+  expected_range: [number, number];
   message: string;
   ai_insight: string;
   timestamp: number;
@@ -85,7 +104,9 @@ export default function Dashboard() {
   const [spawnSparkles, setSpawnSparkles] = useState(false);
 
   // State variables
-  const [connected, setConnected] = useState(false);
+  const [, setConnected] = useState(false);
+  const [wsStatus, setWsStatus] = useState<"CONNECTING" | "CONNECTED" | "RECONNECTING" | "DISCONNECTED" | "STALE_DATA">("CONNECTING");
+  const wsStatusRef = useRef<"CONNECTING" | "CONNECTED" | "RECONNECTING" | "DISCONNECTED" | "STALE_DATA">("CONNECTING");
   const [selectedSymbol, setSelectedSymbol] = useState<string>("TSLA");
   const [watchlist, setWatchlist] = useState<string[]>(["TSLA", "NBIS", "COST", "SPX", "APPLOVIN"]);
   const [watchlistPrices, setWatchlistPrices] = useState<Record<string, number>>({});
@@ -122,6 +143,11 @@ export default function Dashboard() {
   const currentPriceRef = useRef<number>(0);
   const selectedSymbolRef = useRef<string>("TSLA");
   const wsRef = useRef<WebSocket | null>(null);
+  const lastTickTimeRef = useRef<number>(Date.now());
+  // Track first-seen price per symbol this session for % change calculation
+  const sessionOpenPricesRef = useRef<Record<string, number>>({});
+  // Track latest VWAP from alert data per symbol
+  const latestVwapRef = useRef<Record<string, number>>({});
 
   // Safely restore token on dynamic page hydrate
   useEffect(() => {
@@ -186,6 +212,11 @@ export default function Dashboard() {
       drawChart();
     }
   }, [activeCandle, token]);
+
+  const updateWsStatus = (status: "CONNECTING" | "CONNECTED" | "RECONNECTING" | "DISCONNECTED" | "STALE_DATA") => {
+    wsStatusRef.current = status;
+    setWsStatus(status);
+  };
 
   // Safe client telemetry logger
   const logSystem = (text: string, type: LogLine["type"]) => {
@@ -468,9 +499,11 @@ export default function Dashboard() {
 
     let ws: WebSocket;
     let reconnectTimeout: NodeJS.Timeout;
+    let pingInterval: NodeJS.Timeout;
     let reconnectAttempts = 0;
 
     const connect = () => {
+      updateWsStatus("CONNECTING");
       const envWsUrl = process.env.NEXT_PUBLIC_WS_URL;
       let wsUrl: string;
 
@@ -500,7 +533,16 @@ export default function Dashboard() {
       ws.onopen = () => {
         reconnectAttempts = 0;
         setConnected(true);
+        updateWsStatus("CONNECTED");
+        lastTickTimeRef.current = Date.now();
         logSystem("Standard WebSocket connection handshake successful. Feed bound to Redis.", "system");
+
+        // Active ping keepalive (every 15 seconds) to prevent Render container sleep
+        pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "ping" }));
+          }
+        }, 15000);
       };
 
       ws.onmessage = (event) => {
@@ -511,8 +553,14 @@ export default function Dashboard() {
 
           if (channel === "market:ticks") {
             const tick = data as TickData;
+            lastTickTimeRef.current = Date.now();
 
-            // 1. Maintain watchlist prices state
+            // 1. Record first-seen price as session open for % change
+            if (!(tick.symbol in sessionOpenPricesRef.current)) {
+              sessionOpenPricesRef.current[tick.symbol] = tick.price;
+            }
+
+            // 2. Maintain watchlist prices state
             setWatchlistPrices(prev => ({ ...prev, [tick.symbol]: tick.price }));
 
             // 2. Process active chart ticking price updates
@@ -563,7 +611,12 @@ export default function Dashboard() {
 
           } else if (channel === "signals:alerts") {
             const signal = data as AlertData;
-            logSystem(`[ALERT] Strategy crossover fired: ${signal.message}`, "alert");
+            logSystem(`[ALERT] ${signal.symbol} ${signal.action} | ${signal.top_strategy_name} | Conf: ${signal.confidence}/100 | R:R 1:${signal.rr}`, "alert");
+
+            // Cache latest VWAP for this symbol for chart/stats display
+            if (signal.vwap > 0) {
+              latestVwapRef.current[signal.symbol] = signal.vwap;
+            }
 
             setSignals(prev => [signal, ...prev].slice(0, 15));
             if (signal.symbol === selectedSymbolRef.current) {
@@ -577,6 +630,21 @@ export default function Dashboard() {
               localStorage.setItem("watchlist", JSON.stringify(symbols));
             }
             logSystem(`Synced persistent watchlist from backend: ${symbols.join(", ")}`, "system");
+          } else if (channel === "market:status") {
+            const statusData = data as { status: string; feed: string; error?: string };
+            logSystem(`[FEED STATUS] Source: ${statusData.feed} | Status: ${statusData.status.toUpperCase()} ${statusData.error ? '| Info: ' + statusData.error : ''}`, "system");
+            
+            if (statusData.status === "connecting") {
+              updateWsStatus("CONNECTING");
+            } else if (statusData.status === "reconnecting") {
+              updateWsStatus("RECONNECTING");
+            } else if (statusData.status === "disconnected") {
+              updateWsStatus("DISCONNECTED");
+            } else if (statusData.status === "connected") {
+              updateWsStatus("CONNECTED");
+            } else if (statusData.status === "stale") {
+              updateWsStatus("STALE_DATA");
+            }
           }
         } catch (e) {
           logSystem(`[ERROR] Processing WebSockets packet: ${(e as Error).message}`, "error");
@@ -589,7 +657,9 @@ export default function Dashboard() {
 
       ws.onclose = () => {
         setConnected(false);
+        updateWsStatus("RECONNECTING");
         logSystem("WebSocket pipeline detached. Starting backoff reconnect...", "error");
+        clearInterval(pingInterval);
 
         // Backoff reconnect
         reconnectTimeout = setTimeout(() => {
@@ -601,157 +671,201 @@ export default function Dashboard() {
 
     connect();
 
+    // Client-side watchdog to detect stale ticks.
+    // Threshold matches backend: 45s during market hours (9:30–16:00 ET), 5 min off-hours.
+    // Without this alignment, the frontend shows false STALE_DATA on nights/weekends.
+    const isMarketHours = () => {
+      const now = new Date();
+      const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const day = et.getDay(); // 0=Sun, 6=Sat
+      if (day === 0 || day === 6) return false;
+      const h = et.getHours(), m = et.getMinutes();
+      const mins = h * 60 + m;
+      return mins >= 9 * 60 + 30 && mins < 16 * 60;
+    };
+    const staleCheckInterval = setInterval(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        const elapsed = Date.now() - lastTickTimeRef.current;
+        const threshold = isMarketHours() ? 45000 : 300000;
+        if (elapsed > threshold) {
+          updateWsStatus("STALE_DATA");
+        } else if (wsStatusRef.current === "STALE_DATA" && elapsed <= threshold) {
+          updateWsStatus("CONNECTED");
+        }
+      }
+    }, 5000);
+
     return () => {
       if (ws) ws.close();
       clearTimeout(reconnectTimeout);
+      clearInterval(pingInterval);
+      clearInterval(staleCheckInterval);
     };
+  // wsStatus intentionally excluded: adding it to deps would restart the WS connection on every status change
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
-  // HTML5 Canvas chart renderer
+  // HTML5 Canvas chart renderer — candlestick + volume sub-chart + EMA-9 + VWAP line
   function drawChart() {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
-
     if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
       canvas.width = width * dpr;
       canvas.height = height * dpr;
       ctx.scale(dpr, dpr);
     }
-
     ctx.clearRect(0, 0, width, height);
 
-    // Filter closed candles by active focused symbol
-    const candles = closedCandlesRef.current.filter(c => c.symbol === selectedSymbolRef.current);
+    const sym = selectedSymbolRef.current;
+    const allCandles = closedCandlesRef.current.filter(c => c.symbol === sym);
     const active = activeCandleRef.current;
+    if (active && active.symbol === sym && active.open > 0) allCandles.push(active);
 
-    if (active && active.symbol === selectedSymbolRef.current && active.open > 0) {
-      candles.push(active);
-    }
-
-    if (candles.length === 0) {
+    if (allCandles.length === 0) {
       ctx.fillStyle = "rgba(148, 163, 184, 0.45)";
       ctx.font = "500 13px system-ui";
       ctx.textAlign = "center";
-      ctx.fillText(`Aggregating real-time ${selectedSymbolRef.current} price indicators. Waiting for tick feed...`, width / 2, height / 2);
+      ctx.fillText(`Aggregating real-time ${sym} price data. Waiting for tick feed...`, width / 2, height / 2);
       return;
     }
 
-    // Min/Max price boundaries
-    let maxP = -Infinity;
-    let minP = Infinity;
-    candles.forEach(c => {
-      maxP = Math.max(maxP, c.high);
-      minP = Math.min(minP, c.low);
-    });
+    // Show last 50 candles for meaningful history
+    const MAX_BARS = 50;
+    const candles = allCandles.slice(-MAX_BARS);
+    const n = candles.length;
 
-    // EMA-5 overlay indicator
-    const emaPoints: { idx: number; val: number }[] = [];
-    const windowSize = 5;
-    for (let i = 0; i < candles.length; i++) {
-      if (i >= windowSize - 1) {
-        const sum = candles.slice(i - windowSize + 1, i + 1).reduce((acc, c) => acc + c.close, 0);
-        emaPoints.push({ idx: i, val: sum / windowSize });
-      }
-    }
-
-    const priceRange = maxP - minP || 2;
-    maxP += priceRange * 0.15;
-    minP -= priceRange * 0.15;
-
-    const padLeft = 10;
-    const padRight = width < 480 ? 52 : 75;
-    const padTop = 30;
-    const padBottom = 30;
-
+    // Layout: top 72% price chart, bottom 28% volume chart
+    const padLeft = 4;
+    const padRight = width < 480 ? 54 : 72;
+    const padTop = 24;
+    const volH = Math.floor(height * 0.22);
+    const gapH = 8;
+    const priceH = height - padTop - volH - gapH;
     const cW = width - padLeft - padRight;
-    const cH = height - padTop - padBottom;
 
-    const getX = (idx: number) => {
-      const cSize = cW / 15;
-      return padLeft + idx * cSize + cSize / 2;
-    };
+    // Candle slot size
+    const slotW = cW / n;
+    const barW = Math.max(Math.floor(slotW * 0.65), 2);
+    const getX = (i: number) => padLeft + i * slotW + slotW / 2;
 
-    const getY = (price: number) => {
-      return padTop + cH * (1 - (price - minP) / (maxP - minP));
-    };
+    // Price bounds
+    let maxP = -Infinity, minP = Infinity;
+    candles.forEach(c => { maxP = Math.max(maxP, c.high); minP = Math.min(minP, c.low); });
+    const priceRange = maxP - minP || maxP * 0.01 || 1;
+    maxP += priceRange * 0.12;
+    minP -= priceRange * 0.06;
+    const getY = (p: number) => padTop + priceH * (1 - (p - minP) / (maxP - minP));
 
-    // Draw horizontal grid lines
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.02)";
+    // Volume bounds
+    const maxVol = Math.max(...candles.map(c => c.volume), 1);
+    const volTop = padTop + priceH + gapH;
+    const getVolH = (v: number) => Math.max((v / maxVol) * (volH - 4), 1);
+
+    // ── Grid lines ─────────────────────────────────────────────
+    ctx.strokeStyle = "rgba(255,255,255,0.025)";
     ctx.lineWidth = 1;
-    for (let i = 1; i < 4; i++) {
-      const y = padTop + (cH * i) / 4;
-      ctx.beginPath();
-      ctx.moveTo(padLeft, y);
-      ctx.lineTo(width - padRight, y);
-      ctx.stroke();
-
-      const val = maxP - ((maxP - minP) * i) / 4;
-      ctx.fillStyle = "rgba(148, 163, 184, 0.35)";
-      ctx.font = "400 10px monospace";
+    for (let i = 1; i < 5; i++) {
+      const y = padTop + (priceH * i) / 5;
+      ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(width - padRight, y); ctx.stroke();
+      const val = maxP - ((maxP - minP) * i) / 5;
+      ctx.fillStyle = "rgba(148,163,184,0.4)";
+      ctx.font = "400 9px monospace";
       ctx.textAlign = "left";
-      ctx.fillText(val.toFixed(2), width - padRight + 8, y + 3);
+      ctx.fillText(val.toFixed(2), width - padRight + 6, y + 3);
     }
 
-    // Draw Candles
-    const barWidth = Math.max((cW / 15) * 0.6, 6);
-    candles.slice(-15).forEach((c, idx) => {
-      const x = getX(idx);
-      const yO = getY(c.open);
-      const yC = getY(c.close);
-      const yH = getY(c.high);
-      const yL = getY(c.low);
-
-      const bullish = c.close >= c.open;
-      const themeColor = bullish ? "#10b981" : "#ef4444";
-      const wickColor = bullish ? "rgba(16, 185, 129, 0.4)" : "rgba(239, 68, 68, 0.4)";
-
-      // Draw Wick
-      ctx.strokeStyle = wickColor;
+    // ── VWAP line (from most recent alert for this symbol) ─────
+    const vwapVal = latestVwapRef.current[sym];
+    if (vwapVal && vwapVal >= minP && vwapVal <= maxP) {
+      const yV = getY(vwapVal);
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = "rgba(99,102,241,0.7)";
       ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(x, yH);
-      ctx.lineTo(x, yL);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(padLeft, yV); ctx.lineTo(width - padRight, yV); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(99,102,241,0.9)";
+      ctx.font = "bold 9px monospace";
+      ctx.fillText(`VWAP ${vwapVal.toFixed(2)}`, width - padRight + 6, yV - 2);
+    }
 
-      // Draw Candle Body
-      ctx.fillStyle = themeColor;
-      const bH = Math.abs(yC - yO) || 2;
+    // ── Candles + Volume bars ──────────────────────────────────
+    candles.forEach((c, i) => {
+      const x = getX(i);
+      const bullish = c.close >= c.open;
+      const color = bullish ? "#10b981" : "#ef4444";
+      const wickColor = bullish ? "rgba(16,185,129,0.5)" : "rgba(239,68,68,0.5)";
+      const isLast = i === n - 1 && active.open > 0;
+
+      const yO = getY(c.open), yC = getY(c.close);
+      const yH = getY(c.high), yL = getY(c.low);
+
+      // Wick
+      ctx.strokeStyle = wickColor;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, yH); ctx.lineTo(x, yL); ctx.stroke();
+
+      // Body
+      const bodyH = Math.abs(yC - yO) || 1.5;
       const yBody = Math.min(yO, yC);
-      ctx.fillRect(x - barWidth / 2, yBody, barWidth, bH);
-
-      // Pulse glow on active candle
-      if (idx === Math.min(candles.length, 15) - 1 && activeCandleRef.current.open > 0) {
-        ctx.shadowColor = themeColor;
-        ctx.shadowBlur = 6;
-        ctx.fillRect(x - barWidth / 2, yBody, barWidth, bH);
-        ctx.shadowBlur = 0;
+      if (isLast) {
+        ctx.shadowColor = color; ctx.shadowBlur = 8;
       }
+      ctx.fillStyle = color;
+      ctx.fillRect(x - barW / 2, yBody, barW, bodyH);
+      ctx.shadowBlur = 0;
+
+      // Volume bar
+      const vh = getVolH(c.volume);
+      ctx.fillStyle = bullish ? "rgba(16,185,129,0.35)" : "rgba(239,68,68,0.35)";
+      ctx.fillRect(x - barW / 2, volTop + (volH - vh), barW, vh);
     });
 
-    // Draw EMA Indicator Line (Neon Purple)
-    if (emaPoints.length > 0) {
+    // ── EMA-9 (true exponential) ───────────────────────────────
+    if (candles.length >= 9) {
+      const k = 2 / (9 + 1);
+      const ema9: number[] = [];
+      let emaVal = candles[0].close;
+      for (let i = 0; i < candles.length; i++) {
+        emaVal = candles[i].close * k + emaVal * (1 - k);
+        if (i >= 8) ema9.push(emaVal);
+      }
       ctx.strokeStyle = "#c084fc";
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 1.5;
       ctx.shadowColor = "#c084fc";
-      ctx.shadowBlur = 4;
-
+      ctx.shadowBlur = 3;
       ctx.beginPath();
-      emaPoints.slice(-15).forEach((pt, i) => {
-        const x = getX(i);
-        const y = getY(pt.val);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+      ema9.forEach((val, i) => {
+        const x = getX(i + 8);
+        const y = getY(val);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.stroke();
       ctx.shadowBlur = 0;
     }
+
+    // ── Price axis labels ──────────────────────────────────────
+    // Current price tick on right axis
+    const latestClose = candles[n - 1].close;
+    const yCur = getY(latestClose);
+    if (yCur >= padTop && yCur <= padTop + priceH) {
+      ctx.fillStyle = latestClose >= candles[n - 1].open ? "#10b981" : "#ef4444";
+      ctx.font = "bold 9px monospace";
+      ctx.fillText(`$${latestClose.toFixed(2)}`, width - padRight + 6, yCur + 3);
+    }
+
+    // ── Legend ─────────────────────────────────────────────────
+    ctx.font = "bold 9px monospace";
+    ctx.fillStyle = "#c084fc"; ctx.fillText("● EMA-9", padLeft + 4, padTop - 6);
+    if (vwapVal) {
+      ctx.fillStyle = "#6366f1"; ctx.fillText("- - VWAP", padLeft + 60, padTop - 6);
+    }
+    ctx.fillStyle = "rgba(148,163,184,0.4)"; ctx.fillText("VOL", padLeft + 4, volTop + 10);
   }
 
   // Redraw chart dynamically on mobile orientation or viewport resize
@@ -1340,9 +1454,23 @@ export default function Dashboard() {
         <header className="flex flex-col md:flex-row justify-between md:items-center gap-4 p-6 bg-slate-900/65 border border-slate-800/80 backdrop-blur-3xl rounded-2xl shadow-2xl">
           <div className="flex items-center gap-4">
             <div className="relative">
-              <span className={`flex h-4 w-4 rounded-full ${connected ? "bg-emerald-500" : "bg-rose-500"}`} />
-              {connected && (
-                <span className="animate-ping absolute inline-flex h-4 w-4 rounded-full bg-emerald-400 opacity-75 top-0" />
+              <span className={`flex h-4 w-4 rounded-full ${
+                  wsStatus === "CONNECTED"
+                    ? "bg-emerald-500"
+                    : wsStatus === "STALE_DATA"
+                    ? "bg-amber-500"
+                    : wsStatus === "CONNECTING" || wsStatus === "RECONNECTING"
+                    ? "bg-blue-500"
+                    : "bg-rose-500"
+                }`} />
+              {(wsStatus === "CONNECTED" || wsStatus === "STALE_DATA" || wsStatus === "CONNECTING" || wsStatus === "RECONNECTING") && (
+                <span className={`animate-ping absolute inline-flex h-4 w-4 rounded-full opacity-75 top-0 ${
+                    wsStatus === "CONNECTED"
+                      ? "bg-emerald-400"
+                      : wsStatus === "STALE_DATA"
+                      ? "bg-amber-400"
+                      : "bg-blue-400"
+                  }`} />
               )}
             </div>
             <div>
@@ -1356,12 +1484,21 @@ export default function Dashboard() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            <span className={`badge flex items-center gap-1.5 font-mono text-xs px-3.5 py-1.5 rounded-full ${connected
-                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+            <span className={`badge flex items-center gap-1.5 font-mono text-xs px-3.5 py-1.5 rounded-full ${
+                wsStatus === "CONNECTED"
+                  ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                  : wsStatus === "STALE_DATA"
+                  ? "bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse"
+                  : wsStatus === "CONNECTING" || wsStatus === "RECONNECTING"
+                  ? "bg-blue-500/10 text-blue-400 border border-blue-500/20 animate-pulse"
+                  : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
               }`}>
-              <Radio size={12} className={connected ? "animate-pulse text-emerald-400" : ""} />
-              {connected ? "LIVE MULTI-FEED CONNECTED" : "BROADCASTER DISCONNECTED"}
+              <Radio size={12} className={wsStatus === "CONNECTED" || wsStatus === "STALE_DATA" ? "animate-pulse" : ""} />
+              {wsStatus === "CONNECTED" && "LIVE MULTI-FEED CONNECTED"}
+              {wsStatus === "CONNECTING" && "ESTABLISHING HANDSHAKE..."}
+              {wsStatus === "RECONNECTING" && "RECONNECTING FEED..."}
+              {wsStatus === "DISCONNECTED" && "BROADCASTER DISCONNECTED"}
+              {wsStatus === "STALE_DATA" && "FEED ACTIVE (STALE DATA)"}
             </span>
             <span className="badge bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-3.5 py-1.5 rounded-full flex items-center gap-1.5 font-mono text-xs">
               <Cpu size={12} />
@@ -1375,6 +1512,31 @@ export default function Dashboard() {
             </button>
           </div>
         </header>
+
+        {/* Real-time Status Alert Banner */}
+        {wsStatus !== "CONNECTED" && (
+          <div className="bg-amber-500/10 border border-amber-500/20 text-amber-300 px-5 py-4 rounded-2xl flex items-center justify-between backdrop-blur-3xl animate-pulse shadow-xl">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/15 flex items-center justify-center border border-amber-500/20">
+                <AlertTriangle size={18} className="text-amber-400 animate-bounce" />
+              </div>
+              <div>
+                <span className="font-bold text-xs uppercase tracking-wider text-amber-300">Realtime Market Feed Status Alert</span>
+                <p className="text-[11px] text-slate-350 mt-1 leading-normal font-light">
+                  {wsStatus === "CONNECTING" && "Establishing connection to high-performance real-time servers..."}
+                  {wsStatus === "RECONNECTING" && "WebSocket dropped. Attempting backoff reconnection. If deploying, this may take 30-60 seconds."}
+                  {wsStatus === "DISCONNECTED" && "Disconnected from real-time price broker. Check your network or contact platform administrator."}
+                  {wsStatus === "STALE_DATA" && "Market feed is online, but price quotes are currently stale/delayed. Waiting for incoming trade ticks..."}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono font-bold bg-amber-500/25 border border-amber-500/35 px-3 py-1 rounded-full text-amber-300">
+                {wsStatus}
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Real-time Statistics Strip */}
         <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1405,21 +1567,23 @@ export default function Dashboard() {
           </div>
 
           <div className="p-4 bg-slate-900/40 border border-slate-800/80 rounded-xl backdrop-blur flex flex-col justify-center">
-            <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Session VWAP Floor</span>
+            <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Session VWAP ({selectedSymbol})</span>
             <span className="text-lg font-mono font-semibold text-violet-400 mt-1 flex items-center gap-2">
               <BarChart3 size={14} className="text-violet-400" />
-              ${activeAlerts.length > 0 && activeAlerts[0]?.vwap != null
-                ? Number(activeAlerts[0].vwap).toFixed(2)
-                : ((currentPrice > 0 ? currentPrice : (watchlistPrices[selectedSymbol] || 100.0)) * 0.998).toFixed(2)}
+              {activeAlerts.length > 0 && activeAlerts[0].vwap > 0
+                ? `$${Number(activeAlerts[0].vwap).toFixed(2)}`
+                : <span className="text-slate-500 text-sm">Awaiting alert</span>}
             </span>
           </div>
 
           <div className="p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-xl backdrop-blur flex flex-col justify-center">
             <span className="text-[10px] uppercase font-bold text-indigo-400 tracking-wider flex items-center gap-1">
-              <Sparkles size={10} className="animate-pulse" /> OpenAI Quant Sentiment
+              <Sparkles size={10} className="animate-pulse" /> Last Signal ({selectedSymbol})
             </span>
             <span className="text-xs font-semibold text-indigo-200 mt-1 line-clamp-1">
-              {activeAlerts.length > 0 ? `${activeAlerts[0].action} Signal Fired` : "Awaiting Strategy Crossover"}
+              {activeAlerts.length > 0
+                ? `${activeAlerts[0].action} · ${activeAlerts[0].top_strategy_name || activeAlerts[0].action} · Conf: ${activeAlerts[0].confidence}/100`
+                : "Awaiting strategy crossover"}
             </span>
           </div>
         </section>
@@ -1460,6 +1624,10 @@ export default function Dashboard() {
               {watchlist.map(sym => {
                 const active = sym === selectedSymbol;
                 const price = watchlistPrices[sym];
+                const openPrice = sessionOpenPricesRef.current[sym];
+                const pctChange = price !== undefined && openPrice && openPrice > 0
+                  ? ((price - openPrice) / openPrice) * 100
+                  : null;
 
                 return (
                   <div
@@ -1471,20 +1639,23 @@ export default function Dashboard() {
                       }`}
                   >
                     <div className="flex flex-col gap-0.5">
-                      <span className={`font-mono text-sm font-extrabold tracking-wider ${active ? "text-indigo-300" : "text-slate-300"
-                        }`}>
+                      <span className={`font-mono text-sm font-extrabold tracking-wider ${active ? "text-indigo-300" : "text-slate-300"}`}>
                         {sym}
                       </span>
-                      <span className="text-[9px] text-slate-500 uppercase font-mono">Stock Feed</span>
+                      {pctChange !== null ? (
+                        <span className={`text-[9px] font-mono font-bold ${pctChange >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
+                          {pctChange >= 0 ? "+" : ""}{pctChange.toFixed(2)}% session
+                        </span>
+                      ) : (
+                        <span className="text-[9px] text-slate-500 uppercase font-mono">Stock Feed</span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-3 font-mono">
-                      <span className={`text-xs font-semibold font-mono ${active ? "text-cyan-400" : "text-slate-300"
-                        }`}>
-                        {price !== undefined ? `$${price.toLocaleString("en-US", { minimumFractionDigits: 2 })}` : "Loading..."}
+                      <span className={`text-xs font-semibold font-mono ${active ? "text-cyan-400" : "text-slate-300"}`}>
+                        {price !== undefined ? `$${price.toLocaleString("en-US", { minimumFractionDigits: 2 })}` : "—"}
                       </span>
 
-                      {/* Remove Button for added tickers */}
                       <button
                         onClick={(e) => handleRemoveSymbol(sym, e)}
                         className="p-1.5 rounded-lg bg-slate-900/85 hover:bg-rose-500/10 border border-slate-800/40 hover:border-rose-500/20 text-slate-500 hover:text-rose-400 transition-all duration-300"
@@ -1510,7 +1681,7 @@ export default function Dashboard() {
                     {selectedSymbol} Technical Chart
                   </h2>
                   <p className="text-xs text-slate-400 font-mono flex items-center gap-1">
-                    5-second interval aggregates with EMA-5 Overlay
+                    5s candles · EMA-9 · VWAP · Volume
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1610,65 +1781,94 @@ export default function Dashboard() {
                 activeAlerts.map((sig, i) => (
                   <div
                     key={i}
-                    className={`p-4 rounded-xl border animate-slide-in flex flex-col gap-3 shadow-lg transition-transform duration-300 hover:scale-[1.01] ${sig.action === "BUY"
-                        ? "bg-emerald-500/5 border-emerald-500/15"
-                        : "bg-rose-500/5 border-rose-500/15"
+                    className={`p-4 rounded-xl border flex flex-col gap-3 shadow-lg transition-transform duration-300 hover:scale-[1.01] ${sig.action === "BUY"
+                        ? "bg-emerald-500/5 border-emerald-500/20"
+                        : "bg-rose-500/5 border-rose-500/20"
                       }`}
                   >
-                    {/* Header */}
+                    {/* Header row */}
                     <div className="flex justify-between items-center">
-                      <span className={`text-[10px] font-extrabold tracking-wider px-3 py-0.5 rounded-full flex items-center gap-1 ${sig.action === "BUY" ? "bg-emerald-500 text-slate-950" : "bg-rose-500 text-white"
-                        }`}>
-                        {sig.action === "BUY" ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-                        {sig.action} SIGNAL
-                      </span>
-                      <span className="text-[10px] font-mono text-slate-400">{new Date(sig.timestamp * 1000).toLocaleTimeString()}</span>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-extrabold tracking-wider px-2.5 py-0.5 rounded-full flex items-center gap-1 ${sig.action === "BUY" ? "bg-emerald-500 text-slate-950" : "bg-rose-500 text-white"}`}>
+                          {sig.action === "BUY" ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
+                          {sig.action}
+                        </span>
+                        <span className="text-[9px] font-mono text-slate-400 bg-slate-900 border border-slate-800 px-2 py-0.5 rounded-full">
+                          {sig.trade_type || "Intraday"}
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-500">{new Date(sig.timestamp * 1000).toLocaleTimeString()}</span>
                     </div>
 
-                    {/* Message snippet */}
-                    <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-lg">
-                      <div className="text-[11px] font-mono text-slate-300 whitespace-pre-wrap select-all leading-relaxed break-all">
-                        {sig.message}
+                    {/* Strategy name + confidence */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[10px] font-bold text-slate-300">[{sig.top_strategy}] {sig.top_strategy_name}</span>
+                        <span className="text-[9px] text-slate-500 font-mono">
+                          {sig.consensus_bull ?? 0}B / {sig.consensus_bear ?? 0}S · {(sig.strategies_fired ?? []).length} strategies
+                        </span>
+                      </div>
+                      <div className={`text-xs font-black font-mono px-2 py-1 rounded-lg ${sig.confidence >= 75 ? "text-emerald-400 bg-emerald-500/10" : sig.confidence >= 60 ? "text-amber-400 bg-amber-500/10" : "text-slate-400 bg-slate-800"}`}>
+                        {sig.confidence}/100
                       </div>
                     </div>
 
-                    {/* Indicators Pills Grid */}
-                    <div className="grid grid-cols-3 gap-2 text-[10px] font-mono mt-1 text-slate-400">
-                      <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex flex-col gap-0.5 items-center">
+                    {/* Entry / Stop / T1 / T2 / R:R grid */}
+                    <div className="grid grid-cols-2 gap-1.5 text-[10px] font-mono">
+                      <div className="bg-slate-950/50 border border-slate-800/50 rounded-lg px-2.5 py-2 flex justify-between">
+                        <span className="text-slate-500">Entry</span>
+                        <span className="font-bold text-white">${Number(sig.price).toFixed(2)}</span>
+                      </div>
+                      <div className="bg-slate-950/50 border border-amber-500/20 rounded-lg px-2.5 py-2 flex justify-between">
+                        <span className="text-slate-500">Stop</span>
+                        <span className="font-bold text-amber-400">${Number(sig.stop).toFixed(2)}</span>
+                      </div>
+                      <div className="bg-slate-950/50 border border-emerald-500/20 rounded-lg px-2.5 py-2 flex justify-between">
+                        <span className="text-slate-500 flex items-center gap-1"><Target size={8} /> T1</span>
+                        <span className="font-bold text-emerald-400">${Number(sig.t1).toFixed(2)}</span>
+                      </div>
+                      <div className="bg-slate-950/50 border border-cyan-500/20 rounded-lg px-2.5 py-2 flex justify-between">
+                        <span className="text-slate-500 flex items-center gap-1"><Target size={8} /> T2</span>
+                        <span className="font-bold text-cyan-400">${Number(sig.t2).toFixed(2)}</span>
+                      </div>
+                    </div>
+
+                    {/* R:R + VWAP + RSI row */}
+                    <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
+                      <div className="bg-slate-950/30 border border-slate-800/50 rounded p-1.5 flex flex-col items-center gap-0.5">
+                        <span className="text-slate-500 text-[8px] uppercase">R:R</span>
+                        <span className={`font-bold ${(sig.rr ?? 0) >= 2 ? "text-emerald-400" : "text-amber-400"}`}>1:{sig.rr ?? "—"}</span>
+                      </div>
+                      <div className="bg-slate-950/30 border border-slate-800/50 rounded p-1.5 flex flex-col items-center gap-0.5">
+                        <span className="text-slate-500 text-[8px] uppercase">VWAP</span>
+                        <span className="font-semibold text-indigo-400">{sig.vwap > 0 ? `$${Number(sig.vwap).toFixed(2)}` : "—"}</span>
+                      </div>
+                      <div className="bg-slate-950/30 border border-slate-800/50 rounded p-1.5 flex flex-col items-center gap-0.5">
                         <span className="text-slate-500 text-[8px] uppercase">RSI</span>
                         <span className={`font-semibold ${sig.action === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>
-                          {sig.rsi != null ? Number(sig.rsi).toFixed(1) : "N/A"}
-                        </span>
-                      </div>
-                      <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex flex-col gap-0.5 items-center">
-                        <span className="text-slate-500 text-[8px] uppercase">VWAP</span>
-                        <span className="font-semibold text-slate-300">
-                          {sig.vwap != null ? `$${Number(sig.vwap).toFixed(2)}` : "N/A"}
-                        </span>
-                      </div>
-                      <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex flex-col gap-0.5 items-center">
-                        <span className="text-slate-500 text-[8px] uppercase">Stop Loss</span>
-                        <span className="font-semibold text-amber-500">
-                          {sig.stop != null ? `$${Number(sig.stop).toFixed(2)}` : "N/A"}
+                          {sig.rsi != null ? Number(sig.rsi).toFixed(1) : "—"}
                         </span>
                       </div>
                     </div>
 
-                    {/* Targets Grid */}
-                    <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-slate-400">
-                      <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex justify-between items-center px-3">
-                        <span className="text-slate-500 flex items-center gap-1"><Target size={8} /> T1:</span>
-                        <span className="font-semibold text-emerald-400">
-                          {sig.t1 != null ? `$${Number(sig.t1).toFixed(2)}` : "N/A"}
-                        </span>
+                    {/* Exit note */}
+                    {sig.exit_note && (
+                      <div className="text-[9px] text-slate-400 bg-slate-950/40 border border-slate-800/40 rounded px-2.5 py-1.5 font-mono leading-relaxed">
+                        📌 {sig.exit_note}
                       </div>
-                      <div className="bg-slate-950/30 p-2 border border-slate-800/50 rounded flex justify-between items-center px-3">
-                        <span className="text-slate-500 flex items-center gap-1"><Target size={8} /> T2:</span>
-                        <span className="font-semibold text-cyan-400">
-                          {sig.t2 != null ? `$${Number(sig.t2).toFixed(2)}` : "N/A"}
-                        </span>
+                    )}
+
+                    {/* Top conditions met */}
+                    {sig.conditions_met && sig.conditions_met.length > 0 && (
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[8px] uppercase font-bold text-slate-500 tracking-wider">Conditions met</span>
+                        {sig.conditions_met.slice(0, 3).map((c, ci) => (
+                          <span key={ci} className="text-[9px] text-slate-400 font-mono flex items-center gap-1">
+                            <span className="text-emerald-500">✓</span> {c}
+                          </span>
+                        ))}
                       </div>
-                    </div>
+                    )}
                   </div>
                 ))
               )}
