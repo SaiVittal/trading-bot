@@ -252,9 +252,7 @@ export default function Dashboard() {
       const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       try {
         const response = await fetch(`${apiBaseUrl}/api/v1/alerts/telegram/status`, {
-          headers: {
-            "Authorization": `Bearer ${token}`
-          }
+          headers: { "Authorization": `Bearer ${token}` }
         });
         if (response.ok) {
           const data = await response.json();
@@ -265,6 +263,32 @@ export default function Dashboard() {
       }
     };
     fetchTelegramStatus();
+  }, [token]);
+
+  // Fetch recent signals from REST API on login to populate signal panel immediately
+  useEffect(() => {
+    if (!token) return;
+    const fetchRecentSignals = async () => {
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      try {
+        const res = await fetch(`${apiBaseUrl}/api/v1/alerts/signals/recent?limit=15`, {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data: AlertData[] = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            setSignals(data.sort((a, b) => b.timestamp - a.timestamp));
+            const forSelected = data.find(a => a.symbol === selectedSymbol);
+            if (forSelected?.ai_insight) setLatestAIInsight(forSelected.ai_insight);
+            logSystem(`[REST] Loaded ${data.length} recent signal(s) from server`, "system");
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch recent signals", e);
+      }
+    };
+    fetchRecentSignals();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   const handleTelegramToggle = async () => {
@@ -414,9 +438,20 @@ export default function Dashboard() {
     setConnected(false);
     if (wsRef.current) {
       wsRef.current.close();
+      wsRef.current = null;
     }
-    // Clear dynamic session records
+    // Clear all session-scoped state and refs
     setWatchlistPrices({});
+    setSignals([]);
+    setClosedCandles([]);
+    setCurrentPrice(0);
+    setActiveCandle({ symbol: "TSLA", open: 0, high: 0, low: 0, close: 0, volume: 0, timestamp: 0 });
+    setLatestAIInsight("Awaiting real-time trade signals. OpenAI Quant Engine is fully armed and listening to active indicators...");
+    setActiveToast(null);
+    sessionOpenPricesRef.current = {};
+    latestVwapRef.current = {};
+    closedCandlesRef.current = [];
+    lastTickTimeRef.current = Date.now();
     setTelemetry([{ text: "Session terminated. Please authenticate to reconnect.", type: "system", time: new Date().toLocaleTimeString() }]);
   };
 
@@ -429,7 +464,7 @@ export default function Dashboard() {
     });
   }, []);
 
-  // Animated popup dispatchers
+  // Animated popup dispatchers (auto-dismiss after 5 seconds)
   const triggerToasts = (signal: AlertData) => {
     const id = Math.random().toString();
     setActiveToast({
@@ -439,6 +474,7 @@ export default function Dashboard() {
       price: signal.price,
       symbol: signal.symbol
     });
+    setTimeout(() => setActiveToast(prev => prev?.id === id ? null : prev), 5000);
   };
 
   // Dynamic Ticker Searched Subscription hook
@@ -623,6 +659,39 @@ export default function Dashboard() {
               setLatestAIInsight(signal.ai_insight);
             }
             triggerToasts(signal);
+          } else if (channel === "market:candles:history") {
+            // Bulk seed chart with cached candles from backend — fires once on connect per symbol
+            const { symbol: sym, candles: historicCandles } = data as { symbol: string; candles: CandleData[] };
+            if (Array.isArray(historicCandles) && historicCandles.length > 0) {
+              setClosedCandles(prev => {
+                // Merge: remove any existing candles for this symbol then prepend historical batch
+                const others = prev.filter(c => c.symbol !== sym);
+                const merged = [...historicCandles, ...others].slice(0, 400);
+                return merged;
+              });
+              logSystem(`[HISTORY] Loaded ${historicCandles.length} cached candles for ${sym}`, "system");
+            }
+
+          } else if (channel === "signals:alerts:history") {
+            // Bulk seed signal panel with cached alerts — fires once on connect
+            const historicAlerts = data as AlertData[];
+            if (Array.isArray(historicAlerts) && historicAlerts.length > 0) {
+              setSignals(prev => {
+                // Merge: deduplicate by timestamp+symbol, keep newest first
+                const existing = new Set(prev.map(a => `${a.symbol}_${a.timestamp}`));
+                const incoming = historicAlerts.filter(
+                  a => !existing.has(`${a.symbol}_${a.timestamp}`)
+                );
+                return [...prev, ...incoming]
+                  .sort((a, b) => b.timestamp - a.timestamp)
+                  .slice(0, 15);
+              });
+              // Update AI insight if the selected symbol has a cached alert
+              const forSelected = historicAlerts.find(a => a.symbol === selectedSymbolRef.current);
+              if (forSelected?.ai_insight) setLatestAIInsight(forSelected.ai_insight);
+              logSystem(`[HISTORY] Loaded ${historicAlerts.length} cached signal(s) from backend`, "system");
+            }
+
           } else if (channel === "watchlist:sync") {
             const symbols = data as string[];
             setWatchlist(symbols);

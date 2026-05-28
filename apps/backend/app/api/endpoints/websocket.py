@@ -51,10 +51,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket_broadcaster.connect(websocket)
 
     # Retrieve and sync the persistent watchlist with the connected client
+    watchlist_symbols: list = ["TSLA", "NBIS", "COST", "SPX", "APPLOVIN"]
     try:
         stored = await client.smembers("watchlist:symbols")
-        watchlist_symbols = list(stored) if stored else ["TSLA", "NBIS", "COST", "SPX", "APPLOVIN"]
-        
+        if stored:
+            watchlist_symbols = list(stored)
+
         await websocket.send_json({
             "channel": "watchlist:sync",
             "data": watchlist_symbols,
@@ -68,7 +70,46 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 "channel": "market:status",
                 "data": json.loads(status_val),
             })
-            logger.info(f"Synced last feed status to user {username}: {status_val}")
+
+        # ── Send recent candle history (last 50 per symbol) ───────
+        # Allows the chart to render immediately on connect without waiting for new ticks.
+        for sym in watchlist_symbols:
+            try:
+                raw_candles = await client.lrange(f"candles:recent:{sym}", -50, -1)
+                if raw_candles:
+                    await websocket.send_json({
+                        "channel": "market:candles:history",
+                        "data": {
+                            "symbol": sym,
+                            "candles": [json.loads(c) for c in raw_candles],
+                        },
+                    })
+            except Exception as _e:
+                logger.debug(f"Candle history send skipped for {sym}: {_e}")
+
+        # ── Send recent alert history (last 15 across all watchlist symbols) ──
+        # Populates the signal panel immediately on connect.
+        try:
+            all_alerts: list = []
+            seen_ids: set = set()
+            for sym in watchlist_symbols:
+                raw_alerts = await client.lrange(f"alerts:recent:{sym}", 0, 14)
+                for r in raw_alerts:
+                    a = json.loads(r)
+                    uid = f"{a.get('symbol')}_{a.get('timestamp')}"
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        all_alerts.append(a)
+            if all_alerts:
+                all_alerts.sort(key=lambda a: a.get("timestamp", 0), reverse=True)
+                await websocket.send_json({
+                    "channel": "signals:alerts:history",
+                    "data": all_alerts[:15],
+                })
+                logger.info(f"Sent {len(all_alerts[:15])} cached alert(s) to {username}")
+        except Exception as _e:
+            logger.debug(f"Alert history send failed for {username}: {_e}")
+
     except Exception as e:
         logger.error(f"Failed to sync state to client {username} on connect: {e}")
 

@@ -14,6 +14,8 @@ import pytz
 
 from app.core.config import settings
 from app.core.redis_client import redis_client
+from app.core.database import async_session
+from app.models.models import TradingSignal
 from app.services.bot_upgrade import (
     AlertFormatter,
     CandlePatternEngine,
@@ -106,7 +108,6 @@ class RealtimeCandleEngine:
         self.active_candles:         Dict[str, Dict]  = {}
         self.candle_start_times:     Dict[str, float] = {}
         self.closed_candles_history: Dict[str, deque] = {}
-        self.last_telegram_alert_time: Dict[str, float] = {}
         self.last_global_alert_time: Dict[str, float] = {}
 
         # Strategy scanner — 15 strategies; we apply per-strategy thresholds ourselves
@@ -181,7 +182,6 @@ class RealtimeCandleEngine:
             self.active_candles.pop(sym, None)
             self.candle_start_times.pop(sym, None)
             self.closed_candles_history.pop(sym, None)
-            self.last_telegram_alert_time.pop(sym, None)
             self.last_global_alert_time.pop(sym, None)
             self.prior_closes.pop(sym, None)
             self.session_dates.pop(sym, None)
@@ -251,8 +251,19 @@ class RealtimeCandleEngine:
             }
 
     async def publish_candle(self, candle: Dict) -> None:
-        if redis_client.client:
-            await redis_client.client.publish(REDIS_CANDLE_CHANNEL, json.dumps(candle))
+        client = redis_client.client
+        if not client:
+            return
+        payload_str = json.dumps(candle)
+        await client.publish(REDIS_CANDLE_CHANNEL, payload_str)
+        # Cache for new client connections — keep last 200 candles per symbol
+        try:
+            key = f"candles:recent:{candle['symbol']}"
+            await client.rpush(key, payload_str)
+            await client.ltrim(key, -200, -1)
+            await client.expire(key, 86400)  # 24h TTL
+        except Exception as _e:
+            logger.debug(f"Candle cache write skipped for {candle['symbol']}: {_e}")
 
     # ──────────────────────────────────────────────────────────────
     #  DataFrame builder
@@ -280,6 +291,12 @@ class RealtimeCandleEngine:
     # ──────────────────────────────────────────────────────────────
 
     async def evaluate_strategy_checklist(self, symbol: str) -> None:
+        # Require ≥120 closed candles (≈10 minutes of data) before signalling —
+        # avoids false triggers from thin early-session history.
+        _hist = self.closed_candles_history.get(symbol)
+        if not _hist or len(_hist) < 120:
+            return
+
         df_raw = self._build_dataframe(symbol)
         if df_raw is None:
             return
@@ -364,6 +381,18 @@ class RealtimeCandleEngine:
             bear      = 1 if direction == "bearish" else 0
             top       = self._make_top_from_specialty(best_spec)
 
+        # ── Consensus gate ────────────────────────────────────────
+        # Require 2+ strategies agreeing OR a single strategy with ≥78 confidence.
+        # Specialty-only alerts (Opening Drive / S/R) are exempt — they carry their
+        # own confidence thresholds set at scanner level (≥55).
+        if filtered and not (od_signals or sr_signals):
+            if len(signals) < 2 and top.confidence < 78:
+                logger.info(
+                    f"{symbol}: consensus gate — {len(signals)} strategy @ "
+                    f"{top.confidence}/100 (need 2+ or ≥78 conf). Suppressed."
+                )
+                return
+
         # ── Price sanity guard — never alert with wrong price ─────
         if not is_price_sane(symbol, top.price):
             logger.warning(
@@ -372,16 +401,65 @@ class RealtimeCandleEngine:
             )
             return
 
-        # ── Global alert cooldown ────────────────────────────────
+        # ── Global alert cooldown (Redis-backed, survives restarts) ─
         now_sec = time.time()
-        last_time = self.last_global_alert_time.get(symbol, 0.0)
-        if now_sec - last_time < settings.TELEGRAM_ALERT_COOLDOWN:
+        cooldown_key = f"alert:cooldown:{symbol}"
+        cooldown_active = False
+        if redis_client.client:
+            try:
+                cooldown_active = bool(await redis_client.client.exists(cooldown_key))
+            except Exception:
+                # Redis unavailable — fall back to in-memory dict
+                last_time = self.last_global_alert_time.get(symbol, 0.0)
+                cooldown_active = (now_sec - last_time) < settings.TELEGRAM_ALERT_COOLDOWN
+        else:
+            last_time = self.last_global_alert_time.get(symbol, 0.0)
+            cooldown_active = (now_sec - last_time) < settings.TELEGRAM_ALERT_COOLDOWN
+
+        if cooldown_active:
             logger.info(
                 f"{symbol}: global alert cooldown active "
-                f"({int(now_sec - last_time)}s elapsed < {settings.TELEGRAM_ALERT_COOLDOWN}s). "
-                f"Suppressing rapid consensus alert to prevent thrashing/noise."
+                f"({settings.TELEGRAM_ALERT_COOLDOWN}s window). Suppressing."
             )
             return
+
+        # ── Direction lock ────────────────────────────────────────
+        # After a BUY alert, a SELL alert needs strong conviction to fire
+        # (prevents flip-flopping that confuses traders).
+        if redis_client.client:
+            try:
+                dir_key = f"alert:last_direction:{symbol}"
+                last_dir = await redis_client.client.get(dir_key)
+                if last_dir and last_dir != direction:
+                    if len(signals) < 3 and top.confidence < 75:
+                        logger.info(
+                            f"{symbol}: direction reversal {last_dir}→{direction} suppressed "
+                            f"(need 3+ strategies or ≥75 conf, got {len(signals)} @ {top.confidence})."
+                        )
+                        return
+            except Exception:
+                pass
+
+        # ── Global rate limiter ───────────────────────────────────
+        # Allow at most 4 Telegram pushes per 10-minute window across all symbols.
+        # Prevents simultaneous multi-symbol bursts from flooding the channel.
+        if redis_client.client:
+            try:
+                rate_bucket = int(now_sec // 600)          # new bucket every 10 min
+                rate_key    = f"alerts:global_rate:{rate_bucket}"
+                rate_count  = await redis_client.client.incr(rate_key)
+                if rate_count == 1:
+                    await redis_client.client.expire(rate_key, 700)  # slightly longer than window
+                if rate_count > 4:
+                    logger.info(
+                        f"Global rate limit: {rate_count} alerts in 10-min window — "
+                        f"suppressing {symbol}."
+                    )
+                    # Undo increment so remaining alerts in window can use the slot
+                    await redis_client.client.decr(rate_key)
+                    return
+            except Exception:
+                pass
 
         logger.info(
             f"{symbol}: {len(signals)} strategy signal(s) fired "
@@ -535,13 +613,41 @@ class RealtimeCandleEngine:
         logger.info(f"Alert — {legacy_str}")
         logger.debug(f"Conditions met: {top.conditions_met}")
 
-        # Update global alert time to prevent rapid whipsaws/thrashing
-        self.last_global_alert_time[symbol] = time.time()
-
+        # ── Set cooldown + direction lock (Redis-backed) ──────────
         if redis_client.client:
-            await redis_client.client.publish(
-                REDIS_ALERT_CHANNEL, json.dumps(alert_payload)
-            )
+            try:
+                await redis_client.client.setex(
+                    cooldown_key, settings.TELEGRAM_ALERT_COOLDOWN, "1"
+                )
+                # Hold direction for 2× cooldown so the next alert can detect flips
+                await redis_client.client.setex(
+                    f"alert:last_direction:{symbol}",
+                    settings.TELEGRAM_ALERT_COOLDOWN * 2,
+                    direction,
+                )
+            except Exception:
+                self.last_global_alert_time[symbol] = now_sec
+        else:
+            self.last_global_alert_time[symbol] = now_sec
+
+        alert_json = json.dumps(alert_payload)
+
+        # ── Publish to Redis pub/sub → WebSocket broadcaster ─────
+        if redis_client.client:
+            await redis_client.client.publish(REDIS_ALERT_CHANNEL, alert_json)
+
+        # ── Cache full alert for new client connections ───────────
+        if redis_client.client:
+            try:
+                cache_key = f"alerts:recent:{symbol}"
+                await redis_client.client.lpush(cache_key, alert_json)
+                await redis_client.client.ltrim(cache_key, 0, 14)   # keep 15
+                await redis_client.client.expire(cache_key, 86400)   # 24h TTL
+            except Exception as _e:
+                logger.debug(f"Alert cache write skipped for {symbol}: {_e}")
+
+        # ── Persist to PostgreSQL (fire-and-forget, never blocks) ─
+        asyncio.create_task(self._persist_signal(alert_payload))
 
         def _on_done(task: asyncio.Task, label: str) -> None:
             if not task.cancelled() and task.exception():
@@ -554,6 +660,31 @@ class RealtimeCandleEngine:
     #  Slack Block Kit builder — combines scanner + upgrade engine
     # ──────────────────────────────────────────────────────────────
 
+
+    # ──────────────────────────────────────────────────────────────
+    #  PostgreSQL persistence
+    # ──────────────────────────────────────────────────────────────
+
+    async def _persist_signal(self, alert: Dict) -> None:
+        """Persist a fired alert to PostgreSQL trading_signals table (audit trail)."""
+        try:
+            signal_id = f"{alert['symbol']}_{alert.get('top_strategy', 'UNK')}_{int(alert['timestamp'])}"
+            async with async_session() as session:
+                sig = TradingSignal(
+                    signal_id=signal_id,
+                    symbol=alert["symbol"],
+                    timeframe="5s",
+                    side=alert["action"],
+                    price=float(alert["price"]),
+                    strategy_name=alert.get("top_strategy_name", "Unknown"),
+                    confidence=float(alert.get("confidence", 0)),
+                    status="alert_sent",
+                )
+                session.add(sig)
+                await session.commit()
+                logger.debug(f"Signal persisted to DB: {signal_id}")
+        except Exception as e:
+            logger.error(f"Failed to persist signal for {alert.get('symbol')}: {e}")
 
     # ──────────────────────────────────────────────────────────────
     #  OpenAI insight enhancement
@@ -612,10 +743,6 @@ class RealtimeCandleEngine:
 
         symbol = sig["symbol"]
         now    = time.time()
-        last   = self.last_telegram_alert_time.get(symbol, 0.0)
-        if now - last < settings.TELEGRAM_ALERT_COOLDOWN:
-            logger.info(f"Telegram cooldown active for {symbol}.")
-            return
 
         emoji      = "🟢" if sig["action"] == "BUY" else "🔴"
         trade_type  = sig.get("trade_type", "Intraday")
@@ -743,7 +870,6 @@ class RealtimeCandleEngine:
                           "parse_mode": "HTML", "disable_web_page_preview": True},
                     timeout=5.0,
                 )
-            self.last_telegram_alert_time[symbol] = now
             logger.info(f"Telegram alert dispatched for {symbol}.")
         except Exception as e:
             logger.error(f"Telegram dispatch error for {symbol}: {e}")

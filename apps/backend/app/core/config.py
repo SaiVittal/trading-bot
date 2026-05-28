@@ -30,8 +30,11 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: Optional[str] = Field(None, validation_alias="OPENAI_API_KEY")
 
-    # Polygon.io
-    POLYGON_API_KEY:      Optional[str] = Field(None, validation_alias="POLYGON_API_KEY")
+    # Alpaca Markets
+    ALPACA_API_KEY:    Optional[str] = Field(None, validation_alias="ALPACA_API_KEY")
+    ALPACA_API_SECRET: Optional[str] = Field(None, validation_alias="ALPACA_API_SECRET")
+    # "sip" requires paid subscription (all US exchanges); "iex" is free (IEX only)
+    ALPACA_FEED:       str            = Field("sip", validation_alias="ALPACA_FEED")
 
     # Telegram
     TELEGRAM_BOT_TOKEN:    Optional[str] = Field(None,  validation_alias="TELEGRAM_BOT_TOKEN")
