@@ -480,7 +480,7 @@ foreach ($sym in $Tickers) {
     [int]$topSW  = if($swSigs.Count -gt 0){[int]($swSigs[0].Split("|")[5])}else{0}
     [int]$topSC  = if($scSigs.Count -gt 0){[int]($scSigs[0].Split("|")[5])}else{0}
     [int]$topMO  = if($moSigs.Count -gt 0){[int]($moSigs[0].Split("|")[5])}else{0}
-    [int]$topAll = [Math]::Max($topOD,[Math]::Max($topDT,[Math]::Max($topSW,[Math]::Max($topSC,$topMO)))])
+    [int]$topAll = [Math]::Max($topOD,[Math]::Max($topDT,[Math]::Max($topSW,[Math]::Max($topSC,$topMO))))
 
     [bool]$consensus = ($fired.Count -ge 2) -or ($topAll -ge 78)
     [int]$longCt  = @($fired|Where-Object{$_.Split("|")[3] -eq "LONG"}).Count
