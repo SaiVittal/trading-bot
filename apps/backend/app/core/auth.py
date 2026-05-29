@@ -1,8 +1,11 @@
 import jwt
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import bcrypt
 from app.core.config import settings
+
+logger = logging.getLogger("app.core.auth")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain text password against its bcrypt hash."""
@@ -37,5 +40,9 @@ def decode_access_token(token: str) -> Optional[dict]:
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         return payload
-    except jwt.PyJWTError:
+    except jwt.ExpiredSignatureError as exc:
+        logger.warning("JWT token expired: %s", exc)
+        return None
+    except jwt.InvalidTokenError as exc:
+        logger.warning("JWT token invalid: %s", exc)
         return None
