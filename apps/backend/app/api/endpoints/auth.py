@@ -1,6 +1,6 @@
 from datetime import timedelta
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -78,15 +78,42 @@ async def register(
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db)
 ) -> Any:
     """Authenticate credentials and return an access token (Standard OAuth2)."""
-    stmt = select(User).where(User.username == form_data.username)
+    # Log incoming content-type for debugging client errors
+    try:
+        content_type = request.headers.get("content-type", "")
+    except Exception:
+        content_type = ""
+
+    # OAuth2PasswordRequestForm should populate username/password when
+    # request is sent as application/x-www-form-urlencoded. If not,
+    # attempt a fallback parse of the form body to provide clearer errors.
+    username = getattr(form_data, "username", None)
+    password = getattr(form_data, "password", None)
+
+    if not username or not password:
+        try:
+            form = await request.form()
+            username = username or form.get("username")
+            password = password or form.get("password")
+        except Exception:
+            # ignore parse errors, will be handled below
+            pass
+
+    # Minimal logging to help reproduce client errors (do not log passwords)
+    from logging import getLogger
+    _log = getLogger("app.api.auth")
+    _log.debug("Login attempt content-type=%s username=%s", content_type, username)
+
+    stmt = select(User).where(User.username == username)
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    if not user or not verify_password(password or "", user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Incorrect username or password"
