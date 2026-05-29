@@ -107,6 +107,34 @@ async def login(
         "token_type": "bearer"
     }
 
+class DevPasswordReset(BaseModel):
+    username: str
+    new_password: str = Field(..., min_length=6)
+
+
+@router.post("/dev-reset-password", include_in_schema=False)
+async def dev_reset_password(
+    body: DevPasswordReset,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    DEV-ONLY: Reset any user's password without authentication.
+    Disabled in production (ENV=production).
+    """
+    if settings.is_production:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    stmt = select(User).where(User.username == body.username)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.hashed_password = get_password_hash(body.new_password)
+    await db.commit()
+    return {"detail": f"Password reset for '{body.username}'"}
+
+
 @router.get("/me", response_model=UserResponse)
 async def read_current_user(
     current_user: User = Depends(get_current_active_user)
