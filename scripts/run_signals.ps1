@@ -140,24 +140,35 @@ foreach ($sym in $Tickers) {
 
     # 5. Intraday session bars (available after 9:30 ET)
     $idays = @(Get-Bars $sym "5Min" $sessionStart 80)
-    $useIntraday = ($idays.Count -ge 3)
+    $useIntraday = ($idays.Count -ge 2)   # use as soon as 2 bars exist
 
-    # Use intraday or fallback to daily for indicators
-    $barSrc    = if ($useIntraday) { $idays } else { $pmBars }
-    $closes    = $barSrc | ForEach-Object { [double]$_.c }
-    if ($closes.Count -lt 2) { $closes = $dailyCloses }
+    # For RSI/EMA: blend last 30 daily closes + intraday closes for rich lookback
+    # This prevents RSI collapsing to 50 when only 2-3 intraday bars exist
+    $dailyTail  = @($dailyCloses | Select-Object -Last 30)
+    $intradayC  = @(if ($useIntraday) { $idays | ForEach-Object { [double]$_.c } }
+                    elseif ($hasPM)   { $pmBars | ForEach-Object { [double]$_.c } }
+                    else              { @() })
+    $blendedC   = @($dailyTail + $intradayC)   # daily anchor + today's prints
 
-    [double]$atr   = if ($useIntraday) { Calc-ATR $idays 14 } else { $atrDaily }
-    if ($atr -lt 0.01) { $atr = $atrDaily }
-    [double]$rsi   = Calc-RSI ([double[]]$closes) 14
-    [double]$ema9  = Calc-EMA ([double[]]$closes) 9
-    [double]$ema21 = Calc-EMA ([double[]]$closes) 21
-    [double]$ema50 = Calc-EMA ([double[]]$closes) 50
+    # ATR: use daily ATR until 14+ intraday bars exist (intraday ATR is noise with 2-3 bars)
+    [double]$iATRraw = if ($idays.Count -ge 14) { Calc-ATR $idays 14 } else { 0.0 }
+    [double]$atr     = if ($iATRraw -gt ($atrDaily * 0.3)) { $iATRraw } else { $atrDaily }
+
+    [double]$rsi   = Calc-RSI  ([double[]]$blendedC) 14
+    [double]$ema9  = Calc-EMA  ([double[]]$blendedC) 9
+    [double]$ema21 = Calc-EMA  ([double[]]$blendedC) 21
+    [double]$ema50 = Calc-EMA  ([double[]]$blendedC) 50
     [double]$vwap  = if ($useIntraday) { Calc-VWAP $idays } else { if ($hasPM) { Calc-VWAP $pmBars } else { $prevClose } }
 
-    # RVOL (intraday vol vs avg)
-    [double]$todayVol = if ($useIntraday) { ($idays | ForEach-Object { [double]$_.v } | Measure-Object -Sum).Sum } else { $pmVol }
-    [double]$rvol     = if ($avgVol20 -gt 0) { [Math]::Round($todayVol / ($avgVol20 * 0.25), 2) } else { 1.0 }
+    # RVOL — pace today's volume vs avg daily; fix: use ToUniversalTime() on both ends
+    $sessionOpenUtc = [DateTime]::Parse("${todayDate}T13:30:00Z").ToUniversalTime()
+    $nowUtcMins     = ([DateTime]::UtcNow.ToUniversalTime() - $sessionOpenUtc).TotalMinutes
+    $fracElapsed    = [Math]::Max([Math]::Min($nowUtcMins / 390.0, 1.0), 0.001)
+    [double]$todayVol = if ($useIntraday) { ($idays | ForEach-Object { [double]$_.v } | Measure-Object -Sum).Sum }
+                        elseif ($hasPM)   { $pmVol }
+                        else              { 0.0 }
+    [double]$projVol  = $todayVol / $fracElapsed
+    [double]$rvol     = if ($avgVol20 -gt 0 -and $projVol -gt 0) { [Math]::Round($projVol / $avgVol20, 2) } else { 0.0 }
 
     [bool]$abvEMA9  = ($curP -gt $ema9)
     [bool]$abvVWAP  = ($curP -gt $vwap)
