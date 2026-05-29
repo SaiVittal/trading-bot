@@ -37,38 +37,52 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     stream using a centralized broadcaster.
 
     On connect:
-      1. Validate JWT token
-      2. Load user's personal watchlist from DB/Redis cache
-      3. Send watchlist:sync, market:status, candle history, alert history
-      4. Enter the receive loop — handle add/remove/ping messages,
-         persisting watchlist changes to DB + Redis + market feed.
+      1. Accept the connection first (never reject before accept)
+      2. Validate JWT token from query params
+      3. Load user from DB (with timeout protection)
+      4. Send watchlist:sync, market:status, candle history, alert history
+      5. Enter the receive loop for add/remove/ping messages
     """
+    # ── Step 1: Accept immediately to establish the connection ──────
+    await websocket.accept()
+
+    # ── Step 2: Validate token ────────────────────────────────────
     token = websocket.query_params.get("token")
     if not token:
         logger.warning("Rejected WebSocket: missing token.")
-        await websocket.accept()
-        await websocket.close(code=1008)
+        await websocket.close(code=1008, reason="Missing token")
         return
 
     payload = decode_access_token(token)
     if not payload:
         logger.warning("Rejected WebSocket: invalid/expired token.")
-        await websocket.accept()
-        await websocket.close(code=1008)
+        await websocket.close(code=1008, reason="Invalid token")
         return
 
     username = payload.get("sub")
 
-    # ── Resolve user from DB ────────────────────────────────────────
-    user_obj: User | None = None
-    async with async_session() as db:
-        result = await db.execute(select(User).where(User.username == username))
-        user_obj = result.scalar_one_or_none()
+    # ── Step 3: Resolve user from DB (with timeout) ────────────────
+    try:
+        import asyncio
+        user_obj: User | None = None
+        async with async_session() as db:
+            result = await asyncio.wait_for(
+                db.execute(select(User).where(User.username == username)),
+                timeout=5.0,  # 5 second timeout to prevent hanging
+            )
+            user_obj = result.scalar_one_or_none()
+    except asyncio.TimeoutError:
+        logger.error(f"DB query timeout looking up user {username}")
+        await websocket.close(code=1011, reason="Database timeout")
+        return
+    except Exception as e:
+        logger.error(f"DB error looking up user {username}: {e}")
+        await websocket.close(code=1011, reason="Database error")
+        return
 
     if not user_obj:
         logger.warning(f"Rejected WebSocket: user {username!r} not found in DB.")
-        await websocket.accept()
-        await websocket.close(code=1008)
+        await websocket.close(code=1008, reason="User not found")
         return
 
     user_id = user_obj.id
