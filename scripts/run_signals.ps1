@@ -195,10 +195,18 @@ if (-not $isWeekday -or -not $isInWindow) {
     exit 0
 }
 
+# ----------------------------------------------------------------
+# $inODWindow MUST be defined here (globally, before the ticker loop)
+# It is used in Get-LastPrice and Get-Bars calls inside the loop.
+# BUG FIX: previously defined at line ~727 AFTER first use at line ~229
+# causing $inODWindow=$false (undefined) = IEX feed used instead of SIP
+# ----------------------------------------------------------------
+[bool]$inODWindow = ($etTotalMin -ge 510 -and $etTotalMin -le 585)  # 8:30 AM=510 .. 9:45 AM=585
+
 $EQ = "=" * 48
 $DV = "-" * 46
 
-Write-Host ("=== Signal Run v5 @ "+$nowET.ToString("HH:mm")+" ET  "+$todayDate+" ===")
+Write-Host ("=== Signal Run v8 @ "+$nowET.ToString("HH:mm")+" ET  "+$todayDate+" ===")
 
 $summary = @()
 
@@ -719,12 +727,8 @@ foreach ($sym in $Tickers) {
     [string]$alertHdr = if($consensus){">>> "+$dir+" ALERT FIRES <<<"}else{"WATCH -- below consensus threshold"}
 
     # ---- Time-window check for Opening Drive ----
-    # OD block only included between 8:30 AM and 9:45 AM ET
-    # Pre-market window: fires as pre-market prep alert
-    [int]$etHour   = $nowET.Hour
-    [int]$etMin    = $nowET.Minute
-    [int]$etMins   = $etHour * 60 + $etMin    # total minutes since midnight ET
-    [bool]$inODWindow = ($etMins -ge 510 -and $etMins -le 585)   # 8:30=510 .. 9:45=585
+    # $inODWindow is set globally above (before ticker loop) -- do NOT redefine here
+    # OD block shown between 8:30 AM and 9:45 AM ET only
 
     # Scorecard helper: returns emoji rating based on confidence + direction alignment
     function OD-Scorecard([int]$conf, [string]$sigDir, [string]$overallDir) {
