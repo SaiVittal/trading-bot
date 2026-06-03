@@ -62,6 +62,21 @@ function Calc-EMA([double[]]$a,[int]$p) {
     return [Math]::Round($e,2)
 }
 
+# Calc-EMA-Series: returns full array of EMA values (one per bar)
+# Used for Golden Cross / Death Cross detection — need prev bar vs current bar EMA values
+function Calc-EMA-Series([double[]]$a,[int]$p) {
+    $result = [System.Collections.Generic.List[double]]::new()
+    if ($a.Count -eq 0) { return $result }
+    $k = 2.0/([Math]::Min($p,$a.Count)+1.0)
+    $e = $a[0]
+    $result.Add([Math]::Round($e,2))
+    for ($i=1; $i -lt $a.Count; $i++) {
+        $e = $a[$i]*$k + $e*(1.0-$k)
+        $result.Add([Math]::Round($e,2))
+    }
+    return $result
+}
+
 function Calc-RSI([double[]]$c,[int]$p=14) {
     if ($c.Count -lt ($p+1)) { return 50.0 }
     $ag=0.0; $al=0.0
@@ -1081,6 +1096,154 @@ foreach ($sym in $Tickers) {
     $msg += "v8 | "+$nowET.ToString("HH:mm")+" ET | "+$sym
 
     Send-TG $msg
+
+    # ============================================================
+    #  S24 / S25 — GOLDEN CROSS & DEATH CROSS (5-min intraday)
+    #  Separate dedicated alert — fires independently of main signal
+    #
+    #  GOLDEN CROSS (S24):
+    #    prev bar: ema9 < ema21  →  current bar: ema9 > ema21
+    #    + price above BOTH ema9 AND ema21
+    #    + price above VWAP
+    #    + RVOL >= 1.5x
+    #    + Pullback entry: price within 0.3x ATR of ema9 (touching 9 EMA)
+    #
+    #  DEATH CROSS (S25):
+    #    prev bar: ema9 > ema21  →  current bar: ema9 < ema21
+    #    + price below BOTH ema9 AND ema21
+    #    + price below VWAP
+    #    + RVOL >= 1.5x
+    #    + Bounce entry: price within 0.3x ATR of ema9 (touching 9 EMA)
+    # ============================================================
+    if ($hasID -and $idays.Count -ge 6) {
+        # Build EMA series on 5-min closes
+        [double[]]$id5C      = @($idays | ForEach-Object { [double]$_.c })
+        $ema9Series          = @(Calc-EMA-Series $id5C 9)
+        $ema21Series         = @(Calc-EMA-Series $id5C 21)
+
+        if ($ema9Series.Count -ge 2 -and $ema21Series.Count -ge 2) {
+            [int]$last  = $ema9Series.Count - 1
+            [int]$prev  = $last - 1
+
+            [double]$ema9Curr  = $ema9Series[$last]
+            [double]$ema9Prev  = $ema9Series[$prev]
+            [double]$ema21Curr = $ema21Series[$last]
+            [double]$ema21Prev = $ema21Series[$prev]
+
+            # Detect crossover transitions
+            [bool]$goldenCross = ($ema9Prev -lt $ema21Prev) -and ($ema9Curr -gt $ema21Curr)
+            [bool]$deathCross  = ($ema9Prev -gt $ema21Prev) -and ($ema9Curr -lt $ema21Curr)
+
+            # Pullback / bounce proximity check (price within 0.3x ATR of 9 EMA)
+            [bool]$atEMA9      = ([Math]::Abs($curP - $ema9Curr) -lt ($atr * 0.3))
+
+            # ---- S24: GOLDEN CROSS ----
+            if ($goldenCross -and $curP -gt $ema9Curr -and $curP -gt $ema21Curr -and $abvVWAP -and $rvol -gt 1.5) {
+                [int]$gcConf = 82
+                if ($rvol -gt 2.5){$gcConf += 5}
+                if ($rsi -gt 55) {$gcConf += 4}
+                if ($atEMA9)     {$gcConf += 6}   # pullback entry bonus
+                $gcConf = [Math]::Min($gcConf, 97)
+
+                [string]$gcEntry  = fmt $curP
+                [string]$gcStop   = fmt ([Math]::Round($curP - $atr * 0.5, 2))
+                [string]$gcT1     = fmt ([Math]::Round($curP + $atr * 1.0, 2))
+                [string]$gcT2     = fmt ([Math]::Round($curP + $atr * 2.0, 2))
+                [string]$gcT3     = fmt ([Math]::Round($curP + $atr * 3.0, 2))
+                [string]$gcStrike = fmt ([Math]::Ceiling($curP / 5.0) * 5.0)
+                [string]$gcPullbackNote = if ($atEMA9) { "PULLBACK ENTRY ACTIVE -- price touching 9 EMA now" } `
+                                          else { "Wait for pullback to 9 EMA="+$ema9Curr+" for entry" }
+
+                $gcMsg  = $EQ+"`n"
+                $gcMsg += "[GOLDEN CROSS] "+$sym+"  |  S24 INTRADAY LONG SIGNAL`n"
+                $gcMsg += $EQ+"`n"
+                $gcMsg += "CROSS TYPE  : 9 EMA crossed ABOVE 21 EMA (5-min)`n"
+                $gcMsg += "PREV BAR    : EMA9="+$ema9Prev+" vs EMA21="+$ema21Prev+" (9 was BELOW 21)`n"
+                $gcMsg += "CURR BAR    : EMA9="+$ema9Curr+" vs EMA21="+$ema21Curr+" (9 now ABOVE 21)`n"
+                $gcMsg += $DV+"`n"
+                $gcMsg += "PRICE       : "+(fmt $curP)+"`n"
+                $gcMsg += "VWAP        : "+(fmt $vwap)+"  (price ABOVE VWAP -- confirmed)`n"
+                $gcMsg += "EMA9 (5min) : "+$ema9Curr+"  EMA21: "+$ema21Curr+"`n"
+                $gcMsg += "RSI         : "+$rsi+"    RSI1m: "+$rsi1m+"`n"
+                $gcMsg += "RVOL        : "+$rvol+"x   ATR: "+$atr+"`n"
+                $gcMsg += "CONFIDENCE  : "+$gcConf+"%`n"
+                $gcMsg += $DV+"`n"
+                $gcMsg += "ENTRY SETUP : "+$gcPullbackNote+"`n"
+                $gcMsg += $DV+"`n"
+                $gcMsg += "OPTION      : [UP] CALL "+$gcStrike+" (0DTE exp "+$expDate+")`n"
+                $gcMsg += "Entry(stk)  : "+$gcEntry+"`n"
+                $gcMsg += "Exit T1     : "+$gcT1+"  -- TAKE PROFIT (1x ATR)`n"
+                $gcMsg += "Exit T2     : "+$gcT2+"  -- EXTENDED (2x ATR)`n"
+                $gcMsg += "Exit T3     : "+$gcT3+"  -- MAX TARGET (3x ATR)`n"
+                $gcMsg += "Stop(stk)   : "+$gcStop+"  -- CUT LOSS (0.5x ATR)`n"
+                $gcMsg += $DV+"`n"
+                $gcMsg += "RULES:`n"
+                $gcMsg += "  1. Confirm 5-min candle CLOSES above both EMA9+EMA21`n"
+                $gcMsg += "  2. Price must stay above VWAP "+$vwap+"`n"
+                $gcMsg += "  3. Enter on pullback to EMA9="+$ema9Curr+" (within 0.3x ATR)`n"
+                $gcMsg += "  4. Stop below "+$gcStop+" (0.5x ATR below entry)`n"
+                $gcMsg += "  5. Trail stop to EMA9 once T1 hit`n"
+                $gcMsg += $EQ+"`n"
+                $gcMsg += "v8-GC | "+$nowET.ToString("HH:mm")+" ET | "+$sym
+
+                Send-TG $gcMsg
+                Write-Host ("  [S24] GOLDEN CROSS FIRED for "+$sym+" -- EMA9 crossed above EMA21 on 5-min")
+            }
+
+            # ---- S25: DEATH CROSS ----
+            elseif ($deathCross -and $curP -lt $ema9Curr -and $curP -lt $ema21Curr -and (-not $abvVWAP) -and $rvol -gt 1.5) {
+                [int]$dcConf = 80
+                if ($rvol -gt 2.5){$dcConf += 5}
+                if ($rsi -lt 45) {$dcConf += 4}
+                if ($atEMA9)     {$dcConf += 6}   # bounce entry bonus
+                $dcConf = [Math]::Min($dcConf, 97)
+
+                [string]$dcEntry  = fmt $curP
+                [string]$dcStop   = fmt ([Math]::Round($curP + $atr * 0.5, 2))
+                [string]$dcT1     = fmt ([Math]::Round($curP - $atr * 1.0, 2))
+                [string]$dcT2     = fmt ([Math]::Round($curP - $atr * 2.0, 2))
+                [string]$dcT3     = fmt ([Math]::Round($curP - $atr * 3.0, 2))
+                [string]$dcStrike = fmt ([Math]::Floor($curP / 5.0) * 5.0)
+                [string]$dcBounceNote = if ($atEMA9) { "BOUNCE ENTRY ACTIVE -- price touching 9 EMA now" } `
+                                        else { "Wait for bounce to 9 EMA="+$ema9Curr+" for entry" }
+
+                $dcMsg  = $EQ+"`n"
+                $dcMsg += "[DEATH CROSS] "+$sym+"  |  S25 INTRADAY SHORT SIGNAL`n"
+                $dcMsg += $EQ+"`n"
+                $dcMsg += "CROSS TYPE  : 9 EMA crossed BELOW 21 EMA (5-min)`n"
+                $dcMsg += "PREV BAR    : EMA9="+$ema9Prev+" vs EMA21="+$ema21Prev+" (9 was ABOVE 21)`n"
+                $dcMsg += "CURR BAR    : EMA9="+$ema9Curr+" vs EMA21="+$ema21Curr+" (9 now BELOW 21)`n"
+                $dcMsg += $DV+"`n"
+                $dcMsg += "PRICE       : "+(fmt $curP)+"`n"
+                $dcMsg += "VWAP        : "+(fmt $vwap)+"  (price BELOW VWAP -- confirmed)`n"
+                $dcMsg += "EMA9 (5min) : "+$ema9Curr+"  EMA21: "+$ema21Curr+"`n"
+                $dcMsg += "RSI         : "+$rsi+"    RSI1m: "+$rsi1m+"`n"
+                $dcMsg += "RVOL        : "+$rvol+"x   ATR: "+$atr+"`n"
+                $dcMsg += "CONFIDENCE  : "+$dcConf+"%`n"
+                $dcMsg += $DV+"`n"
+                $dcMsg += "ENTRY SETUP : "+$dcBounceNote+"`n"
+                $dcMsg += $DV+"`n"
+                $dcMsg += "OPTION      : [DN] PUT "+$dcStrike+" (0DTE exp "+$expDate+")`n"
+                $dcMsg += "Entry(stk)  : "+$dcEntry+"`n"
+                $dcMsg += "Exit T1     : "+$dcT1+"  -- TAKE PROFIT (1x ATR)`n"
+                $dcMsg += "Exit T2     : "+$dcT2+"  -- EXTENDED (2x ATR)`n"
+                $dcMsg += "Exit T3     : "+$dcT3+"  -- MAX TARGET (3x ATR)`n"
+                $dcMsg += "Stop(stk)   : "+$dcStop+"  -- CUT LOSS (0.5x ATR)`n"
+                $dcMsg += $DV+"`n"
+                $dcMsg += "RULES:`n"
+                $dcMsg += "  1. Confirm 5-min candle CLOSES below both EMA9+EMA21`n"
+                $dcMsg += "  2. Price must stay below VWAP "+$vwap+"`n"
+                $dcMsg += "  3. Enter on bounce to EMA9="+$ema9Curr+" (within 0.3x ATR)`n"
+                $dcMsg += "  4. Stop above "+$dcStop+" (0.5x ATR above entry)`n"
+                $dcMsg += "  5. Trail stop to EMA9 once T1 hit`n"
+                $dcMsg += $EQ+"`n"
+                $dcMsg += "v8-DC | "+$nowET.ToString("HH:mm")+" ET | "+$sym
+
+                Send-TG $dcMsg
+                Write-Host ("  [S25] DEATH CROSS FIRED for "+$sym+" -- EMA9 crossed below EMA21 on 5-min")
+            }
+        }
+    }
 
     $statusStr = if($consensus){$dir+" ALERT (OD:"+$odSigs.Count+" 0DTE:"+$dtSigs.Count+" SC:"+$scSigs.Count+" MO:"+$moSigs.Count+" SW:"+$swSigs.Count+" top:"+$topAll+"%)"}else{"WATCH (OD:"+$odSigs.Count+" 0DTE:"+$dtSigs.Count+" SC:"+$scSigs.Count+" MO:"+$moSigs.Count+" SW:"+$swSigs.Count+")"}
     $summary += [PSCustomObject]@{
