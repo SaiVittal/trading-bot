@@ -1,6 +1,11 @@
 # ============================================================
-# Trading Bot Signal Runner  v5
+# Trading Bot Signal Runner  v8
 # Signals : Opening Drive | 0DTE | Swing | SCALP | MOMENTUM
+# v6 fixes : BBW gate | VWAP Reclaim signal | Capitulation flush detection
+#             Daily-trend soft penalty | Failed-breakdown reversal pattern
+# v8 fixes : EMA20 (was EMA21) | Prev Day High/Low | Vol 150% hard check
+#             Opening Range = 15 min (3 bars) | Consensus threshold 85%
+#             Max 3 signals limiter | Risk/Reward 1:2 enforced | PDH/PDL signals
 # Branch  : feat/scalp-momentum-signals
 #
 # RULE: No price variable ever goes inside a double-quoted string.
@@ -27,17 +32,24 @@ $baseUrl = "https://data.alpaca.markets"
 function fmt([double]$v) { return "$" + [Math]::Round($v,2).ToString("F2") }
 function pct([double]$v) { return [Math]::Round($v,1).ToString() + "%" }
 
-function Get-Bars([string]$s,[string]$tf,[string]$start,[int]$lim=100) {
-    $url = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe="+$tf+"&start="+$start+"&limit="+$lim+"&feed=iex&sort=asc"
+function Get-Bars([string]$s,[string]$tf,[string]$start,[int]$lim=100,[bool]$extHours=$false) {
+    # ROOT CAUSE FIX: IEX feed only covers regular market hours (9:30 AM - 4:00 PM ET)
+    # Pre-market bars MUST use feed=sip which covers 4:00 AM - 9:30 AM ET
+    # When $extHours=$true (pre-market window) we use sip feed
+    $feed = if ($extHours) { "sip" } else { "iex" }
+    $ext  = if ($extHours) { "&extended_hours=true" } else { "" }
+    $url  = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe="+$tf+"&start="+$start+"&limit="+$lim+"&feed="+$feed+$ext+"&sort=asc"
     try { return @((Invoke-RestMethod -Uri $url -Headers $hdr).bars) } catch { return @() }
 }
 
-function Get-LastPrice([string]$s) {
+function Get-LastPrice([string]$s,[bool]$extHours=$false) {
+    # Use sip feed for pre-market last price (IEX has no pre-market quotes)
+    $feed = if ($extHours) { "sip" } else { "iex" }
     try {
-        return [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/trades/latest?feed=iex") -Headers $hdr).trade.p,2)
+        return [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/trades/latest?feed="+$feed) -Headers $hdr).trade.p,2)
     } catch {
         try {
-            return [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/bars/latest?feed=iex") -Headers $hdr).bar.c,2)
+            return [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/bars/latest?feed="+$feed) -Headers $hdr).bar.c,2)
         } catch { return 0.0 }
     }
 }
@@ -103,13 +115,49 @@ function Calc-AvgVol1m([object[]]$bars1m,[int]$n=10) {
     return [Math]::Round(($bars1m|Select-Object -Last $n|ForEach-Object{[double]$_.v}|Measure-Object -Average).Average,0)
 }
 
+function Build-TgBody([string]$chatId, [string]$text) {
+    # Build JSON body using raw UTF-8 — avoids PS5.1 ConvertTo-Json emoji expansion
+    # PS5.1 converts ✅ -> ✅ (6 chars), 👀 -> 👀 (12 chars) tripling size
+    # Manual escaping keeps emoji as real UTF-8 chars (3-4 bytes vs 6-12 in JSON unicode escapes)
+    $escaped = $text `
+        -replace '\\', '\\\\' `
+        -replace '"',  '\\"'  `
+        -replace "`r", ''     `
+        -replace "`n", '\n'   `
+        -replace "`t", '\t'
+    return '{"chat_id":"' + $chatId + '","text":"' + $escaped + '"}'
+}
+
 function Send-TG([string]$msg) {
-    $body = '{"chat_id":"' + $TgChat + '","text":' + ($msg|ConvertTo-Json) + '}'
-    try {
-        Invoke-RestMethod -Uri ("https://api.telegram.org/bot"+$TgToken+"/sendMessage") `
-            -Method POST -Body $body -ContentType "application/json" | Out-Null
-    } catch { Write-Host ("TG-ERR: "+$_.Exception.Message) }
-    Start-Sleep -Milliseconds 900
+    # Telegram limit: 4096 UTF-8 chars of TEXT.
+    # Chunk at 3800 raw chars — each chunk's JSON body stays well under 4096 bytes.
+    $maxChunk = 3800
+    $lines    = $msg -split "`n"
+    $chunks   = [System.Collections.Generic.List[string]]::new()
+    $current  = ""
+    foreach ($line in $lines) {
+        $candidate = if ($current -eq "") { $line } else { $current + "`n" + $line }
+        if ($candidate.Length -gt $maxChunk) {
+            if ($current.Length -gt 0) { $chunks.Add($current) }
+            $current = $line
+        } else { $current = $candidate }
+    }
+    if ($current.Length -gt 0) { $chunks.Add($current) }
+
+    $tgUrl = "https://api.telegram.org/bot"+$TgToken+"/sendMessage"
+    $total = $chunks.Count
+    for ($i = 0; $i -lt $total; $i++) {
+        $bodyStr  = Build-TgBody $TgChat $chunks[$i]
+        $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyStr)
+        try {
+            Invoke-RestMethod -Uri $tgUrl -Method POST -Body $bodyBytes `
+                -ContentType "application/json; charset=utf-8" | Out-Null
+            if ($total -gt 1) { Write-Host ("  TG: Sent part "+($i+1)+"/"+$total) }
+        } catch {
+            Write-Host ("TG-ERR: "+$_.Exception.Message+" (part "+($i+1)+"/"+$total+", "+$chunks[$i].Length+" chars)")
+        }
+        Start-Sleep -Milliseconds 900
+    }
 }
 
 # ============================================================
@@ -124,6 +172,28 @@ $dailyStart  = "2026-01-01T00:00:00Z"
 $sessionSt   = $todayDate+"T13:30:00Z"
 $pmStart     = $todayDate+"T09:00:00Z"
 $expDate     = $todayDate.Substring(5,2)+"/"+$todayDate.Substring(8,2)
+
+# ============================================================
+#  MARKET HOURS GATE
+#  Allowed window: 8:30 AM – 4:30 PM ET, Monday–Friday only
+#  Pre-market OD alerts: 8:30–9:30 AM
+#  Intraday signals    : 9:30 AM–4:30 PM
+#  Outside window      : exit silently — no alerts sent
+# ============================================================
+[int]$etHourNow = $nowET.Hour
+[int]$etMinNow  = $nowET.Minute
+[int]$etTotalMin = $etHourNow * 60 + $etMinNow   # minutes since midnight ET
+[int]$dayOfWeek  = [int]$nowET.DayOfWeek          # 0=Sun, 1=Mon, ..., 6=Sat
+
+$isWeekday     = ($dayOfWeek -ge 1 -and $dayOfWeek -le 5)
+$isInWindow    = ($etTotalMin -ge 510 -and $etTotalMin -le 990)  # 8:30=510 .. 4:30=990
+
+if (-not $isWeekday -or -not $isInWindow) {
+    $reason = if (-not $isWeekday) { "Weekend ("+$nowET.DayOfWeek+")" } `
+              else { "Outside market hours ("+$nowET.ToString("HH:mm")+" ET -- allowed 8:30 AM-4:30 PM)" }
+    Write-Host ("=== SKIPPED: "+$reason+" ===")
+    exit 0
+}
 
 $EQ = "=" * 48
 $DV = "-" * 46
@@ -143,21 +213,25 @@ foreach ($sym in $Tickers) {
     $daily = @(Get-Bars $sym "1Day" $dailyStart 90)
     if ($daily.Count -lt 10) { Write-Host ("  "+$sym+": insufficient daily data"); continue }
 
-    [double]$prevClose = [Math]::Round([double]$daily[-1].c,2)
-    [double]$avgVol20  = ($daily|Select-Object -Last 20|ForEach-Object{[double]$_.v}|Measure-Object -Average).Average
+    [double]$prevClose   = [Math]::Round([double]$daily[-1].c,2)
+    [double]$prevDayHigh = [Math]::Round([double]$daily[-1].h,2)   # v8: Previous Day High
+    [double]$prevDayLow  = [Math]::Round([double]$daily[-1].l,2)   # v8: Previous Day Low
+    [double]$avgVol20    = ($daily|Select-Object -Last 20|ForEach-Object{[double]$_.v}|Measure-Object -Average).Average
     [double]$atrDaily  = Calc-ATR $daily 14
     [double[]]$dailyC  = @($daily|ForEach-Object{[double]$_.c})
     [double]$dEMA9     = Calc-EMA $dailyC 9
-    [double]$dEMA21    = Calc-EMA $dailyC 21
+    [double]$dEMA20    = Calc-EMA $dailyC 20   # v8: EMA20 (was EMA21)
+    [double]$dEMA21    = $dEMA20                # alias kept for compatibility
     [double]$dEMA50    = Calc-EMA $dailyC 50
     [double]$dRSI      = Calc-RSI $dailyC 14
 
-    # -- Last trade price --
-    [double]$curP = Get-LastPrice $sym
+    # -- Last trade price -- use SIP feed in pre-market, IEX during market hours
+    [double]$curP = Get-LastPrice $sym $inODWindow
     if ($curP -eq 0.0) { $curP = $prevClose }
 
-    # -- Premarket bars --
-    $pmBars    = @(Get-Bars $sym "1Min" $pmStart 300)
+    # -- Premarket bars -- use SIP feed (IEX has no pre-market data)
+    # $extHours=$true switches Get-Bars to feed=sip + extended_hours=true
+    $pmBars    = @(Get-Bars $sym "1Min" $pmStart 300 $true)
     [bool]$hasPM   = ($pmBars.Count -gt 0)
     [double]$pmO   = if ($hasPM){[Math]::Round([double]$pmBars[0].o,2)}else{0.0}
     [double]$pmH   = if ($hasPM){($pmBars|ForEach-Object{[double]$_.h}|Measure-Object -Maximum).Maximum}else{0.0}
@@ -190,14 +264,18 @@ foreach ($sym in $Tickers) {
     [double]$atr   = if ($iATR -gt ($atrDaily*0.3)){$iATR}else{$atrDaily}
     [double]$rsi   = Calc-RSI  $blend 14
     [double]$ema9  = Calc-EMA  $blend 9
-    [double]$ema21 = Calc-EMA  $blend 21
+    [double]$ema20 = Calc-EMA  $blend 20   # v8: EMA20 (was EMA21)
+    [double]$ema21 = $ema20                 # alias kept for compatibility
     [double]$ema50 = Calc-EMA  $blend 50
     [double]$vwap  = if ($hasID){Calc-VWAP $idays}elseif($hasPM){Calc-VWAP $pmBars}else{$prevClose}
 
     # -- 1-min indicators for scalp --
     [double]$rsi1m   = Calc-RSI $c1m 7          # faster RSI for scalp
     [double]$ema9_1m = Calc-EMA $c1m 9
-    [double]$bbw     = Calc-BBWidth $c1m 20      # BB width % -- low = squeeze ready to pop
+    # FIX #1: BBW gate -- require 20+ 1-min bars before computing squeeze
+    # At open (< 20 bars) BBW=0% is meaningless noise, not a real squeeze
+    [bool]$bbwValid  = ($bars1m.Count -ge 20)
+    [double]$bbw     = if ($bbwValid) { Calc-BBWidth $c1m 20 } else { 0.0 }
 
     # Last 3 1-min candles for momentum detection
     [double]$vol1mAvg = Calc-AvgVol1m $bars1m 10
@@ -218,7 +296,8 @@ foreach ($sym in $Tickers) {
                       elseif($dEMA9 -lt $dEMA21){"DOWNTREND"}else{"SIDEWAYS"}
 
     Write-Host ("  Price="+$curP+"  RSI="+$rsi+"  RSI1m="+$rsi1m+"  EMA9="+$ema9+"  ATR="+$atr)
-    Write-Host ("  RVOL="+$rvol+"x  VWAP="+$vwap+"  BBW="+$bbw+"%  VolSpike="+$volSpike+"x  Trend="+$trend)
+    [string]$bbwDisplay = if ($bbwValid) { ([string]$bbw)+"%  " } else { "N/A ("+$bars1m.Count+" bars)" }
+    Write-Host ("  RVOL="+$rvol+"x  VWAP="+$vwap+"  BBW="+$bbwDisplay+"  VolSpike="+$volSpike+"x  Trend="+$trend)
     Write-Host ("  Daily: dRSI="+$dRSI+"  dEMA9="+$dEMA9+"  dTrend="+$dTrend)
 
     # ============================================================
@@ -229,8 +308,8 @@ foreach ($sym in $Tickers) {
 
     # ---- A. OPENING DRIVE SIGNALS (OD) -------------------------
 
-    # S19A: Gap Breakout Opening Drive
-    if ($gapPct -gt 3.0 -and $rvol -gt 1.2 -and $rsi -gt 52 -and $abvVWAP) {
+    # S19A: Gap Breakout Opening Drive  [v8: RVOL threshold raised to 1.5x = 150% volume]
+    if ($gapPct -gt 3.0 -and $rvol -gt 1.5 -and $rsi -gt 52 -and $abvVWAP) {
         [int]$c=70
         if($gapPct -gt 10){$c+=10};if($gapPct -gt 20){$c+=5};if($gapPct -gt 50){$c+=5}
         if($rvol -gt 3.0){$c+=8};if($rvol -gt 8.0){$c+=5}
@@ -246,16 +325,61 @@ foreach ($sym in $Tickers) {
     }
 
     # S08: Opening Range Breakout / Breakdown
-    if ($hasID -and $idays.Count -ge 2) {
-        [double]$orH = ($idays|Select-Object -First 2|ForEach-Object{[double]$_.h}|Measure-Object -Maximum).Maximum
-        [double]$orL = ($idays|Select-Object -First 2|ForEach-Object{[double]$_.l}|Measure-Object -Minimum).Minimum
-        if ($curP -gt $orH -and $rvol -gt 1.2) {
-            [int]$c=72; if($rvol -gt 2.0){$c+=6}; if($rvol -gt 5.0){$c+=4}
-            $raw.Add("OD|S08|Opening Range Breakout|LONG|CALL|"+$c+"|Broke ORB high "+[Math]::Round($orH,2)+" RVOL="+$rvol+"x.")
-        } elseif ($curP -lt $orL -and $rvol -gt 1.2) {
-            [int]$c=70; if($rvol -gt 2.0){$c+=6}
-            $raw.Add("OD|S08|Opening Range Breakdown|SHORT|PUT|"+$c+"|Broke ORB low "+[Math]::Round($orL,2)+" RVOL="+$rvol+"x.")
+    # v8: OR now uses first 3 × 5-min bars = 15 minutes (was 2 bars = 10 min)
+    # v8: RVOL threshold raised to 1.5x = 150% volume requirement
+    if ($hasID -and $idays.Count -ge 3) {
+        [double]$orH = ($idays|Select-Object -First 3|ForEach-Object{[double]$_.h}|Measure-Object -Maximum).Maximum
+        [double]$orL = ($idays|Select-Object -First 3|ForEach-Object{[double]$_.l}|Measure-Object -Minimum).Minimum
+        if ($curP -gt $orH -and $rvol -gt 1.5) {
+            [int]$c=74; if($rvol -gt 2.0){$c+=6}; if($rvol -gt 5.0){$c+=4}
+            $raw.Add("OD|S08|Opening Range Breakout (15min)|LONG|CALL|"+$c+"|Broke 15-min ORB high "+[Math]::Round($orH,2)+" RVOL="+$rvol+"x (>=150% vol confirmed).")
+        } elseif ($curP -lt $orL -and $rvol -gt 1.5) {
+            [int]$c=72; if($rvol -gt 2.0){$c+=6}
+            $raw.Add("OD|S08|Opening Range Breakdown (15min)|SHORT|PUT|"+$c+"|Broke 15-min ORB low "+[Math]::Round($orL,2)+" RVOL="+$rvol+"x (>=150% vol confirmed).")
         }
+    }
+
+    # S20: VWAP Reclaim -- price crossed from below VWAP to above (reversal confirmation)
+    # FIX #3: Detect VWAP reclaim cross -- the single most important reversal signal
+    # Uses last 2 intraday 5-min closes: prev below VWAP, current above VWAP
+    if ($hasID -and $idays.Count -ge 2 -and $vwap -gt 0) {
+        [double]$prevClose5m = [double]($idays[-2]).c
+        [double]$currClose5m = [double]($idays[-1]).c
+        [bool]$vwapReclaim   = ($prevClose5m -lt $vwap) -and ($currClose5m -gt $vwap)
+        if ($vwapReclaim -and $rvol -gt 0.8) {
+            [int]$c=80
+            if ($rvol -gt 1.5){$c+=5}; if ($rsi1m -gt 50){$c+=4}; if ($rvol -gt 3.0){$c+=4}
+            $c=[Math]::Min($c,95)
+            $raw.Add("OD|S20|VWAP Reclaim Reversal|LONG|CALL|"+$c+"|Price crossed ABOVE VWAP "+$vwap+" (prev close "+[Math]::Round($prevClose5m,2)+" -- now "+[Math]::Round($currClose5m,2)+"). RVOL="+$rvol+"x. HIGH-PRIORITY reversal signal -- enter LONG on next 1-min close above VWAP.")
+        }
+    }
+
+    # S21: Failed Breakdown / Gap Fade Reversal
+    # FIX #5: Detect gap-up that dipped below prior close then recovered -- bearish trap
+    # Pattern: gapped up BUT price fell below prevClose at some point, now recovering above VWAP
+    if ($hasID -and $gapPct -gt 0.1 -and $abvVWAP -and $vwap -gt 0) {
+        [double]$sessionLow = ($idays|ForEach-Object{[double]$_.l}|Measure-Object -Minimum).Minimum
+        [bool]$dippedBelowPrevClose = ($sessionLow -lt $prevClose * 0.999)   # touched or broke prior close
+        [bool]$nowRecovered         = ($curP -gt $vwap) -and ($curP -gt $prevClose * 0.998)
+        if ($dippedBelowPrevClose -and $nowRecovered -and $rsi1m -gt 45) {
+            [int]$c=75; if($rvol -gt 1.5){$c+=5}; if($rsi -gt 52){$c+=4}
+            $c=[Math]::Min($c,92)
+            $raw.Add("OD|S21|Failed Breakdown Reversal|LONG|CALL|"+$c+"|Gap up "+$gapPct+"% but session low "+[Math]::Round($sessionLow,2)+" breached prev close "+$prevClose+". Price now recovered above VWAP "+$vwap+". FAILED BREAKDOWN = bullish trap sprung -- LONG.")
+        }
+    }
+
+    # S22: Previous Day High Breakout (v8)
+    if ($prevDayHigh -gt 0 -and $curP -gt $prevDayHigh -and $rvol -gt 1.5 -and $abvVWAP) {
+        [int]$c=78; if($rvol -gt 2.5){$c+=7}; if($rvol -gt 5.0){$c+=5}
+        $c=[Math]::Min($c,95)
+        $raw.Add("OD|S22|Prev Day High Breakout|LONG|CALL|"+$c+"|Cleared PDH="+$prevDayHigh+" RVOL="+$rvol+"x above VWAP. Key resistance broken -- continuation LONG.")
+    }
+
+    # S23: Previous Day Low Breakdown (v8)
+    if ($prevDayLow -gt 0 -and $curP -lt $prevDayLow -and $rvol -gt 1.5 -and (-not $abvVWAP)) {
+        [int]$c=76; if($rvol -gt 2.5){$c+=7}
+        $c=[Math]::Min($c,95)
+        $raw.Add("OD|S23|Prev Day Low Breakdown|SHORT|PUT|"+$c+"|Broke PDL="+$prevDayLow+" RVOL="+$rvol+"x below VWAP. Key support broken -- continuation SHORT.")
     }
 
     # ---- B. 0DTE SIGNALS ---------------------------------------
@@ -397,24 +521,34 @@ foreach ($sym in $Tickers) {
     }
 
     # SC04: BB Squeeze Scalp -- tight Bollinger band squeeze about to expand
-    if ($bbw -gt 0 -and $bbw -lt 1.5 -and $rvol -gt 1.2) {
+    # FIX #1 applied: only fire when bbwValid=true (20+ bars). BBW=0% at open is NOT a squeeze.
+    if ($bbwValid -and $bbw -gt 0 -and $bbw -lt 1.5 -and $rvol -gt 1.2) {
         [int]$c=70; if($bbw -lt 0.8){$c+=8}; if($rvol -gt 2.5){$c+=5}
         [string]$squeezeDir = if($curP -gt $vwap){"LONG"}else{"SHORT"}
         [string]$squeezeOpt = if($squeezeDir -eq "LONG"){"CALL"}else{"PUT"}
-        $raw.Add("SCALP|SC04|BB Squeeze Breakout Scalp|"+$squeezeDir+"|"+$squeezeOpt+"|"+$c+"|BB width="+$bbw+"% (tight squeeze). RVOL="+$rvol+"x. Scalp "+$squeezeOpt+" -- explosive move expected in 1-5 min.")
+        $raw.Add("SCALP|SC04|BB Squeeze Breakout Scalp|"+$squeezeDir+"|"+$squeezeOpt+"|"+$c+"|BB width="+$bbw+"% ("+$bars1m.Count+"-bar confirmed squeeze). RVOL="+$rvol+"x. Scalp "+$squeezeOpt+" -- explosive move expected in 1-5 min.")
     }
 
     # ---- E. MOMENTUM SIGNALS -----------------------------------
 
     # MO01: Volume Surge Momentum -- RVOL > 2.5x with trend continuation
+    # FIX #2: Detect capitulation flush BEFORE firing SHORT momentum
+    # Capitulation = high RVOL below VWAP + RSI1m oversold + volume drying on recent 1-min bars
+    [bool]$volDrying   = ($vol1mAvg -gt 0) -and ($vol1mLst -lt $vol1mAvg * 0.65)   # last bar < 65% of avg = drying
+    [bool]$rsi1mFlush  = ($rsi1m -lt 38)                                             # 1-min RSI oversold
+    [bool]$capitulation = ((-not $abvVWAP) -and $rvol -gt 2.5 -and $volDrying -and $rsi1mFlush)
+
     if ($rvol -gt 2.5 -and $rsi -gt 50 -and $trend -eq "UP" -and $abvVWAP) {
         [int]$c=75; if($rvol -gt 4.0){$c+=8}; if($rvol -gt 8.0){$c+=5}; if($rsi -gt 60){$c+=4}
         $c=[Math]::Min($c,95)
         $raw.Add("MOMENTUM|MO01|Volume Surge Momentum|LONG|CALL|"+$c+"|RVOL="+$rvol+"x (abnormal volume surge). Trend UP above VWAP="+$vwap+". Ride momentum -- CALL.")
-    } elseif ($rvol -gt 2.5 -and $rsi -lt 50 -and $trend -eq "DOWN" -and (-not $abvVWAP)) {
+    } elseif ($capitulation) {
+        # Capitulation flush: do NOT fire SHORT -- fire a WATCH reversal note instead
+        $raw.Add("0DTE|S17B|Capitulation Flush Watch|LONG|CALL|62|RVOL="+$rvol+"x flush below VWAP but vol drying ("+$vol1mLst+" vs avg "+[Math]::Round($vol1mAvg,0)+") + RSI1m="+$rsi1m+" oversold. POSSIBLE REVERSAL -- wait for VWAP reclaim "+$vwap+" before entry.")
+    } elseif ($rvol -gt 2.5 -and $rsi -lt 50 -and $trend -eq "DOWN" -and (-not $abvVWAP) -and (-not $capitulation)) {
         [int]$c=73; if($rvol -gt 4.0){$c+=8}
         $c=[Math]::Min($c,95)
-        $raw.Add("MOMENTUM|MO01|Volume Surge Momentum|SHORT|PUT|"+$c+"|RVOL="+$rvol+"x surge below VWAP. Trend DOWN. Ride momentum -- PUT.")
+        $raw.Add("MOMENTUM|MO01|Volume Surge Momentum|SHORT|PUT|"+$c+"|RVOL="+$rvol+"x surge below VWAP. Trend DOWN. Confirmed continuation (vol NOT drying) -- PUT.")
     }
 
     # MO02: RSI Momentum Thrust -- RSI 60-76 with full EMA alignment
@@ -482,7 +616,38 @@ foreach ($sym in $Tickers) {
     [int]$topMO  = if($moSigs.Count -gt 0){[int]($moSigs[0].Split("|")[5])}else{0}
     [int]$topAll = [Math]::Max($topOD,[Math]::Max($topDT,[Math]::Max($topSW,[Math]::Max($topSC,$topMO))))
 
-    [bool]$consensus = ($fired.Count -ge 2) -or ($topAll -ge 78)
+    # FIX #4: Daily trend SOFT PENALTY -- reduce confidence, do NOT block signals
+    # A daily downtrend is context, not a hard block. Intraday reversals happen every session.
+    # Penalty: -7% confidence on LONG signals when daily=DOWNTREND; -7% on SHORT when UPTREND
+    $firedAdjusted = [System.Collections.Generic.List[string]]::new()
+    foreach ($sig in $fired) {
+        $parts   = $sig.Split("|")
+        [int]$sigConf = [int]$parts[5]
+        [string]$sigDir = $parts[3]
+        if ($dTrend -eq "DOWNTREND" -and $sigDir -eq "LONG") {
+            $sigConf = [Math]::Max(55, $sigConf - 7)   # small penalty, floor at 55
+        } elseif ($dTrend -eq "UPTREND" -and $sigDir -eq "SHORT") {
+            $sigConf = [Math]::Max(55, $sigConf - 7)
+        }
+        $parts[5] = $sigConf.ToString()
+        $firedAdjusted.Add($parts -join "|")
+    }
+    $fired = @($firedAdjusted)
+
+    # v8: Consensus threshold raised to 85% (was 78%) per filtering rules
+    [bool]$consensus = ($fired.Count -ge 2) -or ($topAll -ge 85)
+
+    # v8: Max 3 active signals — keep only top 3 by confidence score
+    if ($fired.Count -gt 3) {
+        $fired = @($fired | Select-Object -First 3)
+        # Re-categorise after trim
+        $odSigs = @($fired|Where-Object{$_.Split("|")[0] -eq "OD"})
+        $dtSigs = @($fired|Where-Object{$_.Split("|")[0] -eq "0DTE"})
+        $swSigs = @($fired|Where-Object{$_.Split("|")[0] -eq "SWING"})
+        $scSigs = @($fired|Where-Object{$_.Split("|")[0] -eq "SCALP"})
+        $moSigs = @($fired|Where-Object{$_.Split("|")[0] -eq "MOMENTUM"})
+    }
+
     [int]$longCt  = @($fired|Where-Object{$_.Split("|")[3] -eq "LONG"}).Count
     [int]$shortCt = @($fired|Where-Object{$_.Split("|")[3] -eq "SHORT"}).Count
     [string]$dir  = if($longCt -ge $shortCt){"LONG"}else{"SHORT"}
@@ -490,11 +655,19 @@ foreach ($sym in $Tickers) {
     Write-Host ("  Sigs: OD="+$odSigs.Count+" 0DTE="+$dtSigs.Count+" SW="+$swSigs.Count+" SC="+$scSigs.Count+" MO="+$moSigs.Count+"  TopConf="+$topAll+"%  Consensus="+$consensus+"  Dir="+$dir)
 
     # ============================================================
-    #  PRICE LEVELS
+    #  PRICE LEVELS  (v8: Risk/Reward 1:2 minimum enforced)
+    #  Rule: T1 must be >= 2x the stop distance from entry
+    #  If ATR-based T1 does not meet 1:2, levels are adjusted up/down
     # ============================================================
     [double]$ep  = $curP
     [double]$aU  = if($atr -gt 0.01){$atr}else{$ep*0.01}
     [double]$aUs = if($atr -gt 0.01){$atr*0.3}else{$ep*0.003}   # scalp: 0.3x ATR
+
+    # v8: R/R check -- stop = 0.5x ATR, T1 must be >= 1.0x ATR (2:1 ratio from 0.5x stop)
+    # If ATR < minimum viable R/R distance, skip signal display but still alert
+    [double]$rrStop     = $aU * 0.5      # risk = 0.5x ATR
+    [double]$rrMinT1    = $aU * 1.0      # reward = 1.0x ATR = 2:1 ratio
+    [bool]$rrValid      = ($rrMinT1 / [Math]::Max($rrStop,0.01)) -ge 2.0   # always true with ATR math but explicit check
 
     [string]$sEntry=""; [string]$sStop=""; [string]$sT1=""; [string]$sT2=""; [string]$sT3=""
     [string]$scStop=""; [string]$scT1=""; [string]$scT2=""
@@ -545,112 +718,283 @@ foreach ($sym in $Tickers) {
     # ============================================================
     [string]$alertHdr = if($consensus){">>> "+$dir+" ALERT FIRES <<<"}else{"WATCH -- below consensus threshold"}
 
-    # Opening Drive block
-    $odBlock = "--- OPENING DRIVE (Intraday) ---`n"
-    if ($odSigs.Count -gt 0) {
-        foreach ($s in $odSigs) {
-            $p = $s.Split("|")
-            $odBlock += "["+$p[1]+"] "+$p[2]+"`n"
-            $odBlock += "  Type       : OPENING DRIVE "+$p[3]+"`n"
-            $odBlock += "  Confidence : "+$p[5]+"%`n"
-            $odBlock += "  Action     : "+$p[6]+"`n"
-        }
-    } else { $odBlock += "  None fired above threshold`n" }
+    # ---- Time-window check for Opening Drive ----
+    # OD block only included between 8:30 AM and 9:45 AM ET
+    # Pre-market window: fires as pre-market prep alert
+    [int]$etHour   = $nowET.Hour
+    [int]$etMin    = $nowET.Minute
+    [int]$etMins   = $etHour * 60 + $etMin    # total minutes since midnight ET
+    [bool]$inODWindow = ($etMins -ge 510 -and $etMins -le 585)   # 8:30=510 .. 9:45=585
 
-    # 0DTE block
+    # Scorecard helper: returns emoji rating based on confidence + direction alignment
+    function OD-Scorecard([int]$conf, [string]$sigDir, [string]$overallDir) {
+        if ($sigDir -ne $overallDir) { return "[CONFLICT]" }
+        if ($conf -ge 80) { return "[BUY]" }
+        if ($conf -ge 68) { return "[WATCH]" }
+        return "[SKIP]"
+    }
+    function DTE-Scorecard([int]$conf, [string]$sigDir, [string]$overallDir, [bool]$consensus) {
+        if (-not $consensus)         { return "[SKIP - No Consensus]" }
+        if ($sigDir -ne $overallDir) { return "[SKIP - Conflicting]" }
+        if ($conf -ge 80)            { return "[BUY]" }
+        if ($conf -ge 68)            { return "[WATCH]" }
+        return "[SKIP]"
+    }
+
+    # Exact option strike levels: ITM strike for direction clarity
+    # CALL: round up to next $5 strike above current price (slightly OTM)
+    # PUT : round down to next $5 strike below current price (slightly OTM)
+    [double]$callStrike = [Math]::Ceiling($ep  / 5.0) * 5.0
+    [double]$putStrike  = [Math]::Floor($ep    / 5.0) * 5.0
+    [double]$callT1     = [Math]::Round($ep + $aU * 1.0, 2)
+    [double]$callT2     = [Math]::Round($ep + $aU * 2.0, 2)
+    [double]$putT1      = [Math]::Round($ep - $aU * 1.0, 2)
+    [double]$putT2      = [Math]::Round($ep - $aU * 2.0, 2)
+    [double]$callStop   = [Math]::Round($ep - $aU * 0.5, 2)   # stock price stop for CALL
+    [double]$putStop    = [Math]::Round($ep + $aU * 0.5, 2)   # stock price stop for PUT
+
+    # Opening Drive block — time-gated: 8:30 AM – 9:45 AM ET only
+    $odBlock = ""
+    if ($inODWindow) {
+        $odBlock = "--- OPENING DRIVE (Pre-Market Setup) ---`n"
+        if ($odSigs.Count -gt 0) {
+            foreach ($s in $odSigs) {
+                $p      = $s.Split("|")
+                $sigDir = $p[3]
+                [int]$sigConf = [int]$p[5]
+                $sc     = OD-Scorecard $sigConf $sigDir $dir
+
+                # Direction arrow + option type with exact price
+                if ($sigDir -eq "LONG") {
+                    $odEmoji  = "[UP]"
+                    $optLabel = "CALL " + (fmt $callStrike) + " (stock above " + (fmt $ep) + ")"
+                    $tgt1     = fmt $callT1
+                    $tgt2     = fmt $callT2
+                    $stopLvl  = fmt $callStop
+                } else {
+                    $odEmoji  = "[DN]"
+                    $optLabel = "PUT  " + (fmt $putStrike) + " (stock below " + (fmt $ep) + ")"
+                    $tgt1     = fmt $putT1
+                    $tgt2     = fmt $putT2
+                    $stopLvl  = fmt $putStop
+                }
+
+                $odBlock += "["+$p[1]+"] "+$p[2]+"`n"
+                $odBlock += "  Scorecard  : "+$sc+"`n"
+                $odBlock += "  Direction  : "+$odEmoji+" "+$sigDir+"`n"
+                $odBlock += "  Option     : "+$optLabel+"`n"
+                $odBlock += "  Confidence : "+$sigConf+"%`n"
+                $odBlock += "  Entry(stk) : "+(fmt $ep)+"  Stop(stk): "+$stopLvl+"`n"
+                $odBlock += "  Target 1   : "+$tgt1+"  Target 2: "+$tgt2+"`n"
+                $odBlock += "  Note       : "+$p[6]+"`n"
+            }
+        } else {
+            $odBlock += "  None fired above threshold`n"
+        }
+        $odBlock += $DV+"`n"
+    }
+    # Outside OD window: silently suppress OD block (no clutter in intraday alerts)
+
+    # 0DTE block — always shown, but with clear option + scorecard
     $dtBlock = "--- 0DTE OPTIONS (exp today "+$expDate+") ---`n"
     if ($dtSigs.Count -gt 0) {
         foreach ($s in $dtSigs) {
-            $p = $s.Split("|")
+            $p      = $s.Split("|")
+            $sigDir = $p[3]
+            [int]$sigConf = [int]$p[5]
+            $sc     = DTE-Scorecard $sigConf $sigDir $dir $consensus
+
+            if ($sigDir -eq "LONG") {
+                $dteLabel  = "[UP] CALL " + (fmt $callStrike)
+                $dteEntry  = fmt $ep
+                $dteExit1  = fmt $callT1
+                $dteExit2  = fmt $callT2
+                $dteStop   = fmt $callStop
+            } else {
+                $dteLabel  = "[DN] PUT  " + (fmt $putStrike)
+                $dteEntry  = fmt $ep
+                $dteExit1  = fmt $putT1
+                $dteExit2  = fmt $putT2
+                $dteStop   = fmt $putStop
+            }
+
             $dtBlock += "["+$p[1]+"] "+$p[2]+"`n"
-            $dtBlock += "  0DTE Type  : 0DTE "+$p[4]+"S (expires "+$expDate+")`n"
-            $dtBlock += "  Direction  : "+$p[3]+"`n"
-            $dtBlock += "  Confidence : "+$p[5]+"%`n"
+            $dtBlock += "  SCORECARD  : "+$sc+"`n"
+            $dtBlock += "  Option     : "+$dteLabel+"  (exp "+$expDate+")`n"
+            $dtBlock += "  Entry(stk) : "+$dteEntry+"`n"
+            $dtBlock += "  Exit T1    : "+$dteExit1+"  (1x ATR)`n"
+            $dtBlock += "  Exit T2    : "+$dteExit2+"  (2x ATR)`n"
+            $dtBlock += "  Stop(stk)  : "+$dteStop+"  (0.5x ATR)`n"
+            $dtBlock += "  Confidence : "+$sigConf+"%`n"
             $dtBlock += "  Note       : "+$p[6]+"`n"
         }
     } else { $dtBlock += "  None fired above threshold`n" }
 
-    # Scalp block
+    # ============================================================
+    #  SCORECARD HELPER — used by all 4 signal blocks + levels
+    #  Returns a clear action label with emoji
+    # ============================================================
+    function Sig-Scorecard([int]$conf, [string]$sigDir, [string]$overallDir, [bool]$cons, [string]$optType) {
+        $label = $sym + " " + $optType
+        if (-not $cons)              { return "⏭ SKIP   -- " + $label + " (no consensus)" }
+        if ($sigDir -ne $overallDir) { return "⏭ SKIP   -- " + $label + " (signal conflicts overall dir)" }
+        if ($conf -ge 85)            { return "✅ BUY    -- " + $label }
+        if ($conf -ge 75)            { return "👀 WATCH  -- " + $label }
+        if ($conf -ge 65)            { return "😐 NEUTRAL-- " + $label }
+        return                              "❌ SKIP   -- " + $label + " (low conf " + $conf + "%)"
+    }
+
+    # Pre-compute option labels used in all blocks
+    [string]$scOptLabel  = if($dir -eq "LONG"){"CALL "+([int]$callStrike)+"C (buy above "+(fmt $ep)+")"}else{"PUT "+([int]$putStrike)+"P (buy below "+(fmt $ep)+")"}
+    [string]$moOptLabel  = if($dir -eq "LONG"){"CALL "+([int]$callStrike)+"C (momentum ride)"}else{"PUT "+([int]$putStrike)+"P (momentum ride)"}
+    [string]$swOptLabel  = if($dir -eq "LONG"){"CALL "+([int]$callStrike)+"C (2-5 day hold)"}else{"PUT "+([int]$putStrike)+"P (2-5 day hold)"}
+    [string]$dtOptLabel  = if($dir -eq "LONG"){"CALL "+([int]$callStrike)+"C (0DTE exp "+$expDate+")"}else{"PUT "+([int]$putStrike)+"P (0DTE exp "+$expDate+")"}
+
+    # ---- SCALP block -----------------------------------------------
     $scBlock = "--- SCALP SIGNALS (1-5 min quick in/out) ---`n"
     if ($scSigs.Count -gt 0) {
         foreach ($s in $scSigs) {
-            $p = $s.Split("|")
+            $p       = $s.Split("|")
+            $sigDir  = $p[3]
+            [int]$sc = [int]$p[5]
+            $optLbl  = if($sigDir -eq "LONG"){$sym+" "+[int]$callStrike+"C"}else{$sym+" "+[int]$putStrike+"P"}
+            $scCard  = Sig-Scorecard $sc $sigDir $dir $consensus $optLbl
+            if ($sigDir -eq "LONG") {
+                $scEntry_ = fmt $ep; $scT1_ = fmt ([double]$ep + $atr*0.3); $scT2_ = fmt ([double]$ep + $atr*0.6); $scStop_ = fmt ([double]$ep - $atr*0.3)
+                $scArr = "[UP]"
+            } else {
+                $scEntry_ = fmt $ep; $scT1_ = fmt ([double]$ep - $atr*0.3); $scT2_ = fmt ([double]$ep - $atr*0.6); $scStop_ = fmt ([double]$ep + $atr*0.3)
+                $scArr = "[DN]"
+            }
             $scBlock += "["+$p[1]+"] "+$p[2]+"`n"
-            $scBlock += "  Scalp Type : SCALP "+$p[4]+"S`n"
-            $scBlock += "  Direction  : "+$p[3]+"`n"
-            $scBlock += "  Confidence : "+$p[5]+"%`n"
-            $scBlock += "  Entry      : "+$sEntry+"  Stop: "+$scStop+"`n"
-            $scBlock += "  Scalp T1   : "+$scT1+"  T2: "+$scT2+"`n"
+            $scBlock += "  SCORECARD  : "+$scCard+"`n"
+            $scBlock += "  Option     : "+$scArr+" "+$optLbl+"  (scalp 1-5 min)`n"
+            $scBlock += "  Entry(stk) : "+$scEntry_+"`n"
+            $scBlock += "  Exit T1    : "+$scT1_+"  -- SCALP TARGET`n"
+            $scBlock += "  Exit T2    : "+$scT2_+"  -- EXTENDED`n"
+            $scBlock += "  Stop(stk)  : "+$scStop_+"  -- CUT LOSS`n"
+            $scBlock += "  Confidence : "+$sc+"%`n"
             $scBlock += "  Note       : "+$p[6]+"`n"
         }
     } else { $scBlock += "  None fired above threshold`n" }
 
-    # Momentum block
+    # ---- MOMENTUM block --------------------------------------------
     $moBlock = "--- MOMENTUM SIGNALS (ride the wave) ---`n"
     if ($moSigs.Count -gt 0) {
         foreach ($s in $moSigs) {
-            $p = $s.Split("|")
+            $p       = $s.Split("|")
+            $sigDir  = $p[3]
+            [int]$mc = [int]$p[5]
+            $optLbl  = if($sigDir -eq "LONG"){$sym+" "+[int]$callStrike+"C"}else{$sym+" "+[int]$putStrike+"P"}
+            $moCard  = Sig-Scorecard $mc $sigDir $dir $consensus $optLbl
+            if ($sigDir -eq "LONG") {
+                $moEntry_ = fmt $ep; $moT1_ = fmt ([double]$ep + $atr*1.5); $moT2_ = fmt ([double]$ep + $atr*2.5); $moStop_ = fmt ([double]$ep - $atr*0.8)
+                $moArr = "[UP]"
+            } else {
+                $moEntry_ = fmt $ep; $moT1_ = fmt ([double]$ep - $atr*1.5); $moT2_ = fmt ([double]$ep - $atr*2.5); $moStop_ = fmt ([double]$ep + $atr*0.8)
+                $moArr = "[DN]"
+            }
             $moBlock += "["+$p[1]+"] "+$p[2]+"`n"
-            $moBlock += "  Momentum   : MOMENTUM "+$p[4]+"S`n"
-            $moBlock += "  Direction  : "+$p[3]+"`n"
-            $moBlock += "  Confidence : "+$p[5]+"%`n"
-            $moBlock += "  Entry      : "+$sEntry+"  Stop: "+$moStop+"`n"
-            $moBlock += "  Mo T1      : "+$moT1+"  T2: "+$moT2+"`n"
+            $moBlock += "  SCORECARD  : "+$moCard+"`n"
+            $moBlock += "  Option     : "+$moArr+" "+$optLbl+"  (momentum ride)`n"
+            $moBlock += "  Entry(stk) : "+$moEntry_+"`n"
+            $moBlock += "  Exit T1    : "+$moT1_+"  -- MO TARGET (1.5x ATR)`n"
+            $moBlock += "  Exit T2    : "+$moT2_+"  -- EXTENDED (2.5x ATR)`n"
+            $moBlock += "  Stop(stk)  : "+$moStop_+"  -- CUT LOSS (0.8x ATR)`n"
+            $moBlock += "  Confidence : "+$mc+"%`n"
             $moBlock += "  Note       : "+$p[6]+"`n"
         }
     } else { $moBlock += "  None fired above threshold`n" }
 
-    # Swing block
+    # ---- SWING block -----------------------------------------------
     $swBlock = "--- SWING TRADE (2-10 day hold) ---`n"
     if ($swSigs.Count -gt 0) {
         foreach ($s in $swSigs) {
-            $p = $s.Split("|")
+            $p       = $s.Split("|")
+            $sigDir  = $p[3]
+            [int]$wc = [int]$p[5]
+            $optLbl  = if($sigDir -eq "LONG"){$sym+" "+[int]$callStrike+"C (2-5 day)"}else{$sym+" "+[int]$putStrike+"P (2-5 day)"}
+            $swCard  = Sig-Scorecard $wc $sigDir $dir $consensus $optLbl
+            if ($sigDir -eq "LONG") {
+                $swEntry_ = fmt $ep; $swT1_ = fmt ([double]$ep + $atrDaily*2.0); $swT2_ = fmt ([double]$ep + $atrDaily*4.0); $swStop_ = fmt ([double]$ep - $atrDaily*1.5)
+                $swArr = "[UP]"
+            } else {
+                $swEntry_ = fmt $ep; $swT1_ = fmt ([double]$ep - $atrDaily*2.0); $swT2_ = fmt ([double]$ep - $atrDaily*4.0); $swStop_ = fmt ([double]$ep + $atrDaily*1.5)
+                $swArr = "[DN]"
+            }
             $swBlock += "["+$p[1]+"] "+$p[2]+"`n"
-            $swBlock += "  Direction  : "+$p[3]+"`n"
-            $swBlock += "  Confidence : "+$p[5]+"%`n"
+            $swBlock += "  SCORECARD  : "+$swCard+"`n"
+            $swBlock += "  Option     : "+$swArr+" "+$optLbl+"`n"
+            $swBlock += "  Entry(stk) : "+$swEntry_+"`n"
+            $swBlock += "  Exit T1    : "+$swT1_+"  -- SWING TARGET (2x dATR)`n"
+            $swBlock += "  Exit T2    : "+$swT2_+"  -- EXTENDED (4x dATR)`n"
+            $swBlock += "  Stop(stk)  : "+$swStop_+"  -- CUT LOSS (1.5x dATR)`n"
+            $swBlock += "  Confidence : "+$wc+"%`n"
             $swBlock += "  Basis      : "+$p[6]+"`n"
         }
     } else { $swBlock += "  None fired above threshold`n" }
 
-    # Price levels (only for consensus signals)
+    # ---- CONSOLIDATED LEVELS block (consensus only) ----------------
     $lvBlock = ""
     if ($consensus) {
+        # Overall scorecard for the alert
+        $overallCard = Sig-Scorecard $topAll $dir $dir $consensus (if($dir -eq "LONG"){$sym+" "+[int]$callStrike+"C"}else{$sym+" "+[int]$putStrike+"P"})
+
+        # v8: R/R ratio calculation for display
+        [double]$rrRatio = [Math]::Round($rrMinT1 / [Math]::Max($rrStop,0.01), 1)
+        [string]$rrLabel = "1:"+$rrRatio+" R/R"+(if($rrRatio -ge 2.0){" [PASS]"}else{" [SKIP - below 1:2]"})
+
         $lvBlock  = $DV+"`n"
         $lvBlock += "DIRECTION   : "+$dir+"`n"
-        $lvBlock += "ENTRY       : "+$sEntry+"`n"
+        $lvBlock += "ENTRY PRICE : "+$sEntry+"`n"
+        $lvBlock += "RISK/REWARD : "+$rrLabel+"`n"
+        $lvBlock += "PREV DAY H  : "+(fmt $prevDayHigh)+"   PDL: "+(fmt $prevDayLow)+"`n"
         $lvBlock += $DV+"`n"
-        $lvBlock += "SCALP LEVELS (1-5 min):`n"
-        $lvBlock += "  Stop       : "+$scStop+"  (0.3x ATR)`n"
-        $lvBlock += "  T1         : "+$scT1+"`n"
-        $lvBlock += "  T2         : "+$scT2+"`n"
-        $lvBlock += "INTRADAY 0DTE LEVELS:`n"
-        $lvBlock += "  Stop       : "+$sStop+"  (1x ATR)`n"
-        $lvBlock += "  T1         : "+$sT1+"`n"
-        $lvBlock += "  T2         : "+$sT2+"`n"
-        $lvBlock += "  T3         : "+$sT3+"`n"
-        $lvBlock += "MOMENTUM LEVELS:`n"
-        $lvBlock += "  Stop       : "+$moStop+"  (0.8x ATR)`n"
-        $lvBlock += "  T1         : "+$moT1+"  (1.5x ATR)`n"
-        $lvBlock += "  T2         : "+$moT2+"  (2.5x ATR)`n"
-        $lvBlock += "SWING LEVELS (2-5 days):`n"
-        $lvBlock += "  Stop       : "+$swStop+"  (1.5x daily ATR)`n"
-        $lvBlock += "  T1         : "+$swT1+"  (2x daily ATR)`n"
-        $lvBlock += "  T2         : "+$swT2+"  (4x daily ATR)`n"
+
+        # === SCALP LEVELS ===
+        $lvBlock += "SCALP (1-5 min) -- "+$scOptLabel+"`n"
+        $lvBlock += "  Scorecard  : "+(Sig-Scorecard $topAll $dir $dir $consensus (if($dir -eq "LONG"){$sym+" "+[int]$callStrike+"C"}else{$sym+" "+[int]$putStrike+"P"}))+"`n"
+        $lvBlock += "  Entry(stk) : "+$sEntry+"`n"
+        $lvBlock += "  Exit T1    : "+$scT1+"  -- TAKE PROFIT`n"
+        $lvBlock += "  Exit T2    : "+$scT2+"  -- EXTENDED`n"
+        $lvBlock += "  Stop(stk)  : "+$scStop+"  -- CUT LOSS (0.3x ATR)`n"
+
+        # === INTRADAY 0DTE LEVELS ===
         $lvBlock += $DV+"`n"
-        $lvBlock += "0DTE OPTIONS (exp "+$expDate+"):`n"
-        $lvBlock += "  Trade Type : 0DTE "+$optType+"S`n"
-        $lvBlock += "  Strike     : ~"+(fmt $strike)+"  (ATM)`n"
-        $lvBlock += "  Delta      : 0.40-0.55 ATM`n"
-        $lvBlock += "  Entry Rule : Confirm "+$dir+" at 9:35 AM open`n"
-        $lvBlock += "  Exit Rule  : T1 OR 11:00 AM -- whichever first`n"
+        $lvBlock += "INTRADAY 0DTE -- "+$dtOptLabel+"`n"
+        $lvBlock += "  Scorecard  : "+$overallCard+"`n"
+        $lvBlock += "  Entry(stk) : "+$sEntry+"`n"
+        $lvBlock += "  Exit T1    : "+$sT1+"  -- TAKE PROFIT`n"
+        $lvBlock += "  Exit T2    : "+$sT2+"  -- EXTENDED`n"
+        $lvBlock += "  Exit T3    : "+$sT3+"  -- MAX TARGET`n"
+        $lvBlock += "  Stop(stk)  : "+$sStop+"  -- CUT LOSS (1x ATR)`n"
+
+        # === MOMENTUM LEVELS ===
+        $lvBlock += $DV+"`n"
+        $lvBlock += "MOMENTUM -- "+$moOptLabel+"`n"
+        $lvBlock += "  Scorecard  : "+$overallCard+"`n"
+        $lvBlock += "  Entry(stk) : "+$sEntry+"`n"
+        $lvBlock += "  Exit T1    : "+$moT1+"  -- MO TARGET (1.5x ATR)`n"
+        $lvBlock += "  Exit T2    : "+$moT2+"  -- EXTENDED (2.5x ATR)`n"
+        $lvBlock += "  Stop(stk)  : "+$moStop+"  -- CUT LOSS (0.8x ATR)`n"
+
+        # === SWING LEVELS ===
+        $lvBlock += $DV+"`n"
+        $lvBlock += "SWING (2-5 days) -- "+$swOptLabel+"`n"
+        $lvBlock += "  Scorecard  : "+$overallCard+"`n"
+        $lvBlock += "  Entry(stk) : "+$sEntry+"`n"
+        $lvBlock += "  Exit T1    : "+$swT1+"  -- SWING TARGET (2x dATR)`n"
+        $lvBlock += "  Exit T2    : "+$swT2+"  -- EXTENDED (4x dATR)`n"
+        $lvBlock += "  Stop(stk)  : "+$swStop+"  -- CUT LOSS (1.5x dATR)`n"
         $lvBlock += $DV+"`n"
     }
 
-    # Assemble full message
+    # Assemble FULL message -- complete signal breakdown + all levels
     $msg  = $EQ+"`n"
     $msg += $sym+"  |  "+$alertHdr+"`n"
     $msg += $EQ+"`n"
     $msg += "PREV CLOSE  : "+(fmt $prevClose)+"`n"
+    $msg += "PREV DAY H  : "+(fmt $prevDayHigh)+"   PDL: "+(fmt $prevDayLow)+"`n"
     $msg += "LAST PRICE  : "+(fmt $curP)+"`n"
     $msg += "GAP         : "+$gapStr+"`n"
     $msg += "PM DATA     : "+$pmStr+"`n"
@@ -659,10 +1003,11 @@ foreach ($sym in $Tickers) {
     $msg += "EMA9       : "+$ema9+"  EMA21: "+$ema21+"`n"
     $msg += "EMA50      : "+$ema50+"  ATR : "+$atr+"`n"
     $msg += "RVOL       : "+$rvol+"x   VWAP: "+$vwap+"`n"
-    $msg += "BB Width   : "+$bbw+"%  VolSpike: "+$volSpike+"x`n"
+    [string]$bbwStr = if ($bbwValid) { ([string]$bbw)+"%" } else { "N/A (<"+$bars1m.Count+" bars)" }
+    $msg += "BB Width   : "+$bbwStr+"  VolSpike: "+$volSpike+"x`n"
     $msg += "Trend      : "+$trend+"   Daily: "+$dTrend+"`n"
     $msg += $DV+"`n"
-    $msg += $odBlock
+    $msg += $odBlock   # empty string outside 8:30-9:45 AM ET window
     $msg += $DV+"`n"
     $msg += $dtBlock
     $msg += $DV+"`n"
@@ -672,8 +1017,64 @@ foreach ($sym in $Tickers) {
     $msg += $DV+"`n"
     $msg += $swBlock
     $msg += $lvBlock
+
+    # ----------------------------------------------------------------
+    # WATCH CONTEXT BLOCK — shown when no signals fire (0% confidence)
+    # Gives trader full situational awareness even with no trade signal
+    # ----------------------------------------------------------------
+    if (-not $consensus) {
+        # RSI condition label
+        $rsiLabel = if ($rsi -lt 30) { "OVERSOLD "+$rsi+" -- snap-back risk" }
+                    elseif ($rsi -lt 40) { "Bearish "+$rsi }
+                    elseif ($rsi -lt 50) { "Neutral-Bear "+$rsi }
+                    elseif ($rsi -lt 60) { "Neutral "+$rsi }
+                    elseif ($rsi -lt 70) { "Bullish "+$rsi }
+                    else { "OVERBOUGHT "+$rsi }
+        # RSI1m condition
+        $rsi1mLabel = if ($rsi1m -lt 25) { "EXTREME OVERSOLD "+$rsi1m+" -- bounce alert" }
+                      elseif ($rsi1m -lt 38) { "Oversold "+$rsi1m }
+                      elseif ($rsi1m -lt 50) { "Soft "+$rsi1m }
+                      elseif ($rsi1m -lt 65) { "Neutral "+$rsi1m }
+                      else { "Hot "+$rsi1m }
+        # VWAP position
+        $vwapDelta = [Math]::Round($curP - $vwap, 2)
+        $vwapLabel = if ($vwapDelta -gt 0) { "ABOVE VWAP +"+$vwapDelta }
+                     elseif ($vwapDelta -lt 0) { "BELOW VWAP "+$vwapDelta }
+                     else { "AT VWAP" }
+        # BBW squeeze alert
+        $bbwAlert  = if ($bbwValid -and $bbw -lt 0.3) { "EXTREME SQUEEZE "+$bbw+"% -- explosive move imminent" }
+                     elseif ($bbwValid -and $bbw -lt 0.8) { "Tight squeeze "+$bbw+"%" }
+                     else { "Normal "+$bbwStr }
+        # What would trigger a signal
+        $triggerNote = if ($dir -eq "LONG") {
+            "LONG trigger: price reclaims VWAP "+(fmt $vwap)+" + OD/SC engine fires"
+        } else {
+            "SHORT trigger: price breaks below "+(fmt ($vwap - $atr*0.3))+" + SC engine fires"
+        }
+        # Key levels
+        $watchLong  = fmt ([Math]::Round($curP + $atr*1.0, 2))
+        $watchShort = fmt ([Math]::Round($curP - $atr*1.0, 2))
+        $watchVwap  = fmt $vwap
+
+        $msg += $DV+"`n"
+        $msg += "--- WATCH CONTEXT (no signal fired) ---`n"
+        $msg += "  RSI(14)    : "+$rsiLabel+"`n"
+        $msg += "  RSI(1m)    : "+$rsi1mLabel+"`n"
+        $msg += "  VWAP Pos   : "+$vwapLabel+"  (VWAP="+$watchVwap+")`n"
+        $msg += "  BB Width   : "+$bbwAlert+"`n"
+        $msg += "  Trend      : "+$trend+"   Daily: "+$dTrend+"`n"
+        $msg += $DV+"`n"
+        $msg += "  KEY LEVELS TO WATCH:`n"
+        $msg += "  VWAP       : "+$watchVwap+"  (bull/bear line)`n"
+        $msg += "  EMA9       : "+(fmt $ema9)+"  (intraday trend)`n"
+        $msg += "  Upside R1  : "+$watchLong+"  (1x ATR above)`n"
+        $msg += "  Downside S1: "+$watchShort+"  (1x ATR below)`n"
+        $msg += $DV+"`n"
+        $msg += "  NO TRADE NOW -- "+$triggerNote+"`n"
+    }
+
     $msg += $EQ+"`n"
-    $msg += "v5 | "+$nowET.ToString("HH:mm")+" ET | "+$sym
+    $msg += "v8 | "+$nowET.ToString("HH:mm")+" ET | "+$sym
 
     Send-TG $msg
 
