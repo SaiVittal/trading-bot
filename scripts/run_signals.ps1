@@ -33,27 +33,27 @@ function fmt([double]$v) { return "$" + [Math]::Round($v,2).ToString("F2") }
 function pct([double]$v) { return [Math]::Round($v,1).ToString() + "%" }
 
 function Get-Bars([string]$s,[string]$tf,[string]$start,[int]$lim=100,[bool]$extHours=$false) {
-    # NOTE: Alpaca free tier only supports feed=iex (regular market hours 9:30-4PM ET).
-    # SIP (extended hours) requires a paid Alpaca subscription.
-    # Pre-market bars are unavailable on free tier -- bot uses gap% + daily RSI instead.
-    # $extHours parameter kept for forward compatibility when SIP is enabled.
-    $url = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe="+$tf+"&start="+$start+"&limit="+$lim+"&feed=iex&sort=asc"
+    # CONFIRMED: Algo Trader account has SIP access.
+    # SIP feed returns pre-market bars naturally WITHOUT extended_hours parameter.
+    # extended_hours=true causes 400 Bad Request on ALL Alpaca accounts -- wrong param.
+    # Pre-market (extHours=true): feed=sip (returns 4AM-8PM ET data)
+    # Market hours (extHours=false): feed=iex (faster, real-time 9:30AM-4PM ET)
+    $feed = if ($extHours) { "sip" } else { "iex" }
+    $url  = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe="+$tf+"&start="+$start+"&limit="+$lim+"&feed="+$feed+"&sort=asc"
     try { return @((Invoke-RestMethod -Uri $url -Headers $hdr).bars) } catch { return @() }
 }
 
 function Get-LastPrice([string]$s,[bool]$extHours=$false) {
-    # Pre-market: try SIP then IEX fallback; market hours: IEX only
-    $feeds = if ($extHours) { @("sip","iex") } else { @("iex") }
-    foreach ($feed in $feeds) {
-        try {
-            $p = [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/trades/latest?feed="+$feed) -Headers $hdr).trade.p,2)
-            if ($p -gt 0) { return $p }
-        } catch {}
-        try {
-            $p = [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/bars/latest?feed="+$feed) -Headers $hdr).bar.c,2)
-            if ($p -gt 0) { return $p }
-        } catch {}
-    }
+    # Pre-market: sip feed (Algo Trader); market hours: iex feed (faster)
+    $feed = if ($extHours) { "sip" } else { "iex" }
+    try {
+        $p = [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/trades/latest?feed="+$feed) -Headers $hdr).trade.p,2)
+        if ($p -gt 0) { return $p }
+    } catch {}
+    try {
+        $p = [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/bars/latest?feed="+$feed) -Headers $hdr).bar.c,2)
+        if ($p -gt 0) { return $p }
+    } catch {}
     return 0.0
 }
 
@@ -188,7 +188,7 @@ $nowET       = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId($nowUtc,"Eas
 $sessionOpen = [DateTime]::Parse($todayDate+"T13:30:00Z").ToUniversalTime()
 $dailyStart  = "2026-01-01T00:00:00Z"
 $sessionSt   = $todayDate+"T13:30:00Z"
-$pmStart     = $todayDate+"T09:00:00Z"
+$pmStart     = $todayDate+"T08:00:00Z"   # 4:00 AM ET (EDT=UTC-4) -- SIP covers from 4AM ET
 $expDate     = $todayDate.Substring(5,2)+"/"+$todayDate.Substring(8,2)
 
 # ============================================================
