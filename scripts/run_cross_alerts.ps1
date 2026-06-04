@@ -13,7 +13,7 @@ param(
     [string]$ApiKey    = "PKUVZN3EUNDEDFIIWS3NHWMKXK",
     [string]$ApiSecret = "2otPyywguF8Xn2mgCwgLifEbP9s8RrbLF9mjVn95EjXo",
     [string]$TgToken   = "8752800861:AAGUp376nhu0E-PoFhuKmx9-x572qUO95kw",
-    [string]$TgChat    = "-4999357279"
+    [string]$TgChat    = "-5177803835"
 )
 
 $ErrorActionPreference = "SilentlyContinue"
