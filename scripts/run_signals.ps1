@@ -33,25 +33,28 @@ function fmt([double]$v) { return "$" + [Math]::Round($v,2).ToString("F2") }
 function pct([double]$v) { return [Math]::Round($v,1).ToString() + "%" }
 
 function Get-Bars([string]$s,[string]$tf,[string]$start,[int]$lim=100,[bool]$extHours=$false) {
-    # ROOT CAUSE FIX: IEX feed only covers regular market hours (9:30 AM - 4:00 PM ET)
-    # Pre-market bars MUST use feed=sip which covers 4:00 AM - 9:30 AM ET
-    # When $extHours=$true (pre-market window) we use sip feed
-    $feed = if ($extHours) { "sip" } else { "iex" }
-    $ext  = if ($extHours) { "&extended_hours=true" } else { "" }
-    $url  = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe="+$tf+"&start="+$start+"&limit="+$lim+"&feed="+$feed+$ext+"&sort=asc"
+    # NOTE: Alpaca free tier only supports feed=iex (regular market hours 9:30-4PM ET).
+    # SIP (extended hours) requires a paid Alpaca subscription.
+    # Pre-market bars are unavailable on free tier -- bot uses gap% + daily RSI instead.
+    # $extHours parameter kept for forward compatibility when SIP is enabled.
+    $url = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe="+$tf+"&start="+$start+"&limit="+$lim+"&feed=iex&sort=asc"
     try { return @((Invoke-RestMethod -Uri $url -Headers $hdr).bars) } catch { return @() }
 }
 
 function Get-LastPrice([string]$s,[bool]$extHours=$false) {
-    # Use sip feed for pre-market last price (IEX has no pre-market quotes)
-    $feed = if ($extHours) { "sip" } else { "iex" }
-    try {
-        return [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/trades/latest?feed="+$feed) -Headers $hdr).trade.p,2)
-    } catch {
+    # Pre-market: try SIP then IEX fallback; market hours: IEX only
+    $feeds = if ($extHours) { @("sip","iex") } else { @("iex") }
+    foreach ($feed in $feeds) {
         try {
-            return [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/bars/latest?feed="+$feed) -Headers $hdr).bar.c,2)
-        } catch { return 0.0 }
+            $p = [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/trades/latest?feed="+$feed) -Headers $hdr).trade.p,2)
+            if ($p -gt 0) { return $p }
+        } catch {}
+        try {
+            $p = [Math]::Round([double](Invoke-RestMethod -Uri ($baseUrl+"/v2/stocks/"+$s+"/bars/latest?feed="+$feed) -Headers $hdr).bar.c,2)
+            if ($p -gt 0) { return $p }
+        } catch {}
     }
+    return 0.0
 }
 
 function Calc-EMA([double[]]$a,[int]$p) {
@@ -306,10 +309,20 @@ foreach ($sym in $Tickers) {
     [double]$volSpike = if ($vol1mAvg -gt 0){[Math]::Round($vol1mLst/$vol1mAvg,1)}else{0.0}
 
     # RVOL (paced vs 20-day avg)
-    $minsElapsed   = ($nowUtc - $sessionOpen).TotalMinutes
-    $fracEl        = [Math]::Max([Math]::Min($minsElapsed/390.0,1.0),0.001)
-    [double]$todayVol = if ($hasID){($idays|ForEach-Object{[double]$_.v}|Measure-Object -Sum).Sum}
-                        elseif($hasPM){$pmVol}else{0.0}
+    # Pre-market: use pmVol from SIP bars paced against pre-market elapsed time (4AM-9:30AM = 330 min)
+    # Intraday  : use idays volume paced against session elapsed time (390 min full day)
+    $minsElapsed = ($nowUtc - $sessionOpen).TotalMinutes
+    if ($inODWindow -and $hasPM -and $pmVol -gt 0) {
+        # Pre-market window: pace pmVol against pre-market duration (8:30AM start = etTotalMin-510 mins)
+        [double]$pmMinsElapsed = [Math]::Max($etTotalMin - 480, 1)  # mins since 8:00 AM ET
+        [double]$pmFrac        = [Math]::Min($pmMinsElapsed / 90.0, 1.0)  # 90 min pre-market window
+        [double]$todayVol      = $pmVol
+        [double]$fracEl        = [Math]::Max($pmFrac, 0.001)
+    } else {
+        [double]$fracEl   = [Math]::Max([Math]::Min($minsElapsed/390.0,1.0),0.001)
+        [double]$todayVol = if ($hasID){($idays|ForEach-Object{[double]$_.v}|Measure-Object -Sum).Sum}
+                            elseif($hasPM){$pmVol}else{0.0}
+    }
     [double]$rvol  = if($avgVol20 -gt 0 -and $todayVol -gt 0){[Math]::Round(($todayVol/$fracEl)/$avgVol20,2)}else{0.0}
 
     [bool]$abvEMA9  = ($curP -gt $ema9)
