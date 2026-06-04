@@ -1168,7 +1168,7 @@ foreach ($sym in $Tickers) {
                                           else { "Wait for pullback to 9 EMA="+$ema9Curr+" for entry" }
 
                 $gcMsg  = $EQ+"`n"
-                $gcMsg += "[GOLDEN CROSS] "+$sym+"  |  S24 INTRADAY LONG SIGNAL`n"
+                $gcMsg += "*** [S24] GOLDEN CROSS -- "+$sym+" ***`n"
                 $gcMsg += $EQ+"`n"
                 $gcMsg += "CROSS TYPE  : 9 EMA crossed ABOVE 21 EMA (5-min)`n"
                 $gcMsg += "PREV BAR    : EMA9="+$ema9Prev+" vs EMA21="+$ema21Prev+" (9 was BELOW 21)`n"
@@ -1199,6 +1199,7 @@ foreach ($sym in $Tickers) {
                 $gcMsg += $EQ+"`n"
                 $gcMsg += "v8-GC | "+$nowET.ToString("HH:mm")+" ET | "+$sym
 
+                Start-Sleep -Seconds 2   # extra gap so GC alert stands out from main signal
                 Send-TG $gcMsg
                 Write-Host ("  [S24] GOLDEN CROSS FIRED for "+$sym+" -- EMA9 crossed above EMA21 on 5-min")
             }
@@ -1221,7 +1222,7 @@ foreach ($sym in $Tickers) {
                                         else { "Wait for bounce to 9 EMA="+$ema9Curr+" for entry" }
 
                 $dcMsg  = $EQ+"`n"
-                $dcMsg += "[DEATH CROSS] "+$sym+"  |  S25 INTRADAY SHORT SIGNAL`n"
+                $dcMsg += "*** [S25] DEATH CROSS -- "+$sym+" ***`n"
                 $dcMsg += $EQ+"`n"
                 $dcMsg += "CROSS TYPE  : 9 EMA crossed BELOW 21 EMA (5-min)`n"
                 $dcMsg += "PREV BAR    : EMA9="+$ema9Prev+" vs EMA21="+$ema21Prev+" (9 was ABOVE 21)`n"
@@ -1252,6 +1253,7 @@ foreach ($sym in $Tickers) {
                 $dcMsg += $EQ+"`n"
                 $dcMsg += "v8-DC | "+$nowET.ToString("HH:mm")+" ET | "+$sym
 
+                Start-Sleep -Seconds 2   # extra gap so DC alert stands out from main signal
                 Send-TG $dcMsg
                 Write-Host ("  [S25] DEATH CROSS FIRED for "+$sym+" -- EMA9 crossed below EMA21 on 5-min")
             }
