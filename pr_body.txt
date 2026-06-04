@@ -1,0 +1,31 @@
+## Summary
+
+- Fix: Entry price was $65 for all tickers -- root cause was pmP variable scoping out. Now uses /v2/stocks/{sym}/trades/latest (Alpaca IEX) via Get-LastPrice().
+- Fix: T1/T2/T3 blank in Telegram alerts -- PowerShell re-parses the leading dollar sign in price strings placed inside double-quoted strings. Fixed with fmt() helper using pure + concatenation throughout.
+- Fix: ATR collapsing to ~$1 at open -- with only 2-3 intraday bars, intraday ATR is meaningless. Script now uses daily ATR-14 until 14+ intraday bars exist.
+- Fix: RVOL showing 0.0 -- UTC datetime arithmetic bug in fracElapsed. Fixed with .ToUniversalTime() on both DateTime operands.
+- Feature: Swing signals (SW01-SW05) -- daily timeframe setups: uptrend continuation, oversold bounce, gap-and-hold, downtrend short, 20-day momentum breakout.
+- Feature: 0DTE type clearly labeled -- every 0DTE alert now shows CALLS or PUTS with strike, delta, and entry/exit rules.
+- Feature: Expanded ticker support -- AVGO, NVDA, AMD, NOW, SPY, QQQ added.
+
+## New file: scripts/run_signals.ps1 (497 lines)
+
+Standalone PowerShell signal runner:
+- Fetches live OHLCV from Alpaca IEX REST API (no web scraping, no fabricated data)
+- Computes RSI-14, EMA9/21/50, ATR-14, VWAP, paced RVOL from raw bars
+- Runs Opening Drive (S19A, S19B, S08), 0DTE (S18, S16, S17, S13, S15, S01, S07), Swing (SW01-SW05)
+- Sends formatted Telegram alerts via Bot API with verified price levels
+
+## Commits
+1. fix: use actual last trade price for entry and T1/T2/T3 targets
+2. fix: use daily ATR when <14 intraday bars + fix RVOL fracElapsed UTC math
+3. fix: eliminate price-variable interpolation causing blank T1/T2/T3
+4. feat: v4 -- Swing signals, 0DTE type labels, fmt() price safety
+
+## Test plan
+- [ ] Run scripts/run_signals.ps1 -- verify ENTRY, STOP, T1, T2, T3 all show correct dollar values in Telegram
+- [ ] Confirm RVOL > 0 for gap tickers after 9:35 AM ET
+- [ ] Confirm ATR matches daily ATR-14 in first 30 min of session
+- [ ] Verify 0DTE alerts explicitly show CALLS or PUTS label
+
+Generated with Claude Code https://claude.com/claude-code
