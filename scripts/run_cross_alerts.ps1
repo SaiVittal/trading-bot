@@ -56,9 +56,14 @@ function Get-LastPrice([string]$s) {
 }
 
 function Calc-EMA-Series([double[]]$a,[int]$p) {
+    # Use the TRUE period multiplier (not capped to array size)
+    # This ensures EMA9 and EMA21 diverge even with few bars
+    # k9  = 2/(9+1)  = 0.20 (always)
+    # k21 = 2/(21+1) = 0.09 (always)
+    # Without this fix, both EMAs use k=2/(min(p,n)+1) = identical when n<9
     $result = [System.Collections.Generic.List[double]]::new()
     if ($a.Count -eq 0) { return $result }
-    $k = 2.0 / ([Math]::Min($p,$a.Count) + 1.0)
+    $k = 2.0 / ($p + 1.0)   # TRUE period multiplier — NOT capped to array size
     $e = $a[0]
     $result.Add([Math]::Round($e,2))
     for ($i=1; $i -lt $a.Count; $i++) {
