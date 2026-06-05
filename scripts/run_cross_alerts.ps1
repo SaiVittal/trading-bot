@@ -146,8 +146,8 @@ foreach ($sym in $Tickers) {
     Write-Host ("`n["+$sym+"] scanning...")
 
     $bars5m = @(Get-5MinBars $sym)
-    if ($bars5m.Count -lt 4) {
-        Write-Host ("  Insufficient bars ("+$bars5m.Count+") -- need 4+ 5-min bars, skip")
+    if ($bars5m.Count -lt 2) {
+        Write-Host ("  Insufficient bars ("+$bars5m.Count+") -- need 2+ 5-min bars, skip")
         continue
     }
 
