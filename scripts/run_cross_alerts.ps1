@@ -182,8 +182,21 @@ foreach ($sym in $Tickers) {
     [bool]$abvVwap = ($curP -gt $vwap -and $vwap -gt 0)
 
     # Cross detection
+    # Standard transition: prev bar EMA9 was above/below, curr bar flipped
     [bool]$goldenCross = ($ema9Prev -lt $ema21Prev) -and ($ema9Curr -gt $ema21Curr)
     [bool]$deathCross  = ($ema9Prev -gt $ema21Prev) -and ($ema9Curr -lt $ema21Curr)
+
+    # Opening-bar gap detection: catches gap-down (DC) / gap-up (GC) opens where
+    # EMA9 never had a bar ABOVE EMA21 but gapped straight below at open.
+    # Fires once when prev bars are nearly equal (opening calc) and curr diverges.
+    [double]$prevDiff = [Math]::Abs($ema9Prev - $ema21Prev)
+    if ($prevDiff -lt 0.15) {
+        if (-not $goldenCross -and -not $deathCross) {
+            if ($ema9Curr -lt $ema21Curr -and ($ema21Curr - $ema9Curr) -gt 0.05) { $deathCross = $true }
+            if ($ema9Curr -gt $ema21Curr -and ($ema9Curr - $ema21Curr) -gt 0.05) { $goldenCross = $true }
+        }
+    }
+
     [bool]$atEMA9      = ([Math]::Abs($curP - $ema9Curr) -lt ($atr * 0.3))
 
     Write-Host ("  EMA9: prev="+$ema9Prev+" curr="+$ema9Curr+"  EMA21: prev="+$ema21Prev+" curr="+$ema21Curr)
