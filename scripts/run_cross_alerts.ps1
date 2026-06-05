@@ -239,6 +239,11 @@ foreach ($sym in $Tickers) {
     [bool]$alreadyFiredDC = Get-StateVal ("DC_"+$sym)
     [bool]$alreadyFiredGC = Get-StateVal ("GC_"+$sym)
 
+    # BLOCK re-fire: if already sent today, force deathCross/goldenCross to false
+    if ($alreadyFiredDC)  { $deathCross  = $false }
+    if ($alreadyFiredGC)  { $goldenCross = $false }
+
+    # Sustained DC/GC: fire ONCE if not yet alerted today and RVOL ≥ 1.0x
     if ($ema9Curr -lt $ema21Curr -and -not $alreadyFiredDC -and $rvol -gt 1.0 -and (-not $abvVwap)) {
         $deathCross = $true
     }
