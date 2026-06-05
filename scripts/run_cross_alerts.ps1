@@ -147,6 +147,24 @@ function Get-AvgVol20([string]$s) {
 # ============================================================
 $crossesDetected = 0
 
+# File-based state: persists across script invocations (each 5-min cron run)
+# Records which tickers have already received DC/GC alerts this trading day
+# Resets automatically when the trading date changes (new day = new state)
+$stateFile = "C:\Users\sdlr2\Downloads\trading-bot\state\cross_state_"+$todayDate+".json"
+$null = New-Item -ItemType Directory -Force -Path (Split-Path $stateFile) 2>$null
+$crossState = if (Test-Path $stateFile) {
+    try { Get-Content $stateFile -Raw | ConvertFrom-Json } catch { [PSCustomObject]@{} }
+} else { [PSCustomObject]@{} }
+
+function Get-StateVal([string]$key) {
+    $val = $crossState.$key
+    return ($val -eq $true)
+}
+function Set-StateVal([string]$key,[bool]$val) {
+    $crossState | Add-Member -NotePropertyName $key -NotePropertyValue $val -Force
+    $crossState | ConvertTo-Json | Set-Content $stateFile -Encoding UTF8
+}
+
 foreach ($sym in $Tickers) {
     Write-Host ("`n["+$sym+"] scanning...")
 
@@ -215,6 +233,22 @@ foreach ($sym in $Tickers) {
     Write-Host ("  EMA9: prev="+$ema9Prev+" curr="+$ema9Curr+"  EMA21: prev="+$ema21Prev+" curr="+$ema21Curr)
     Write-Host ("  GC="+$goldenCross+" DC="+$deathCross+"  Price="+$curP+"  VWAP="+$vwap+"  RVOL="+$rvol+"x")
 
+    # ---- Sustained DC/GC first-time alert (file-persisted state) ----
+    # Fires ONCE per trading day when ticker is in sustained DC/GC with RVOL >= 1.0x
+    # State file: cross_state_YYYY-MM-DD.json — auto-resets each new trading day
+    [bool]$alreadyFiredDC = Get-StateVal ("DC_"+$sym)
+    [bool]$alreadyFiredGC = Get-StateVal ("GC_"+$sym)
+
+    if ($ema9Curr -lt $ema21Curr -and -not $alreadyFiredDC -and $rvol -gt 1.0 -and (-not $abvVwap)) {
+        $deathCross = $true
+    }
+    if ($ema9Curr -gt $ema21Curr -and -not $alreadyFiredGC -and $rvol -gt 1.0 -and $abvVwap) {
+        $goldenCross = $true
+    }
+    # Reset state when cross reverses (allows re-fire on future crossings)
+    if ($ema9Curr -gt $ema21Curr -and $alreadyFiredDC)  { Set-StateVal ("DC_"+$sym) $false }
+    if ($ema9Curr -lt $ema21Curr -and $alreadyFiredGC)  { Set-StateVal ("GC_"+$sym) $false }
+
     # ---- S24: GOLDEN CROSS ----
     # RVOL threshold: standard = 1.5x | opening-bar gap-up = 1.0x | strong move = 1.0x
     [bool]$isOpeningBarGC  = ($prevDiff -lt 0.15) -and $goldenCross
@@ -266,17 +300,19 @@ foreach ($sym in $Tickers) {
         $gcMsg += $EQ+"`n"
         $gcMsg += "v1-GC | "+$nowET.ToString("HH:mm")+" ET | "+$sym
 
+        Set-StateVal ("GC_"+$sym) $true
         Send-TG $gcMsg
         Write-Host ("  >>> S24 GOLDEN CROSS FIRED: "+$sym+" @ "+$curP+" | Conf="+$gcConf+"% | RVOL="+$rvol+"x")
     }
 
     # ---- S25: DEATH CROSS ----
-    # RVOL threshold: standard = 1.5x | opening-bar gap-down = 1.0x | strong move (>2xATR gap) = 1.0x
+    # RVOL threshold: standard = 1.5x | opening-bar gap-down = 1.0x | crash-accel = 0.8x
     [bool]$isOpeningBarDC  = ($prevDiff -lt 0.15) -and $deathCross
     [bool]$isStrongMoveDC  = $deathCross -and ([Math]::Abs($ema9Curr - $ema21Curr) -gt ($atr * 0.25))
-    [bool]$isCrashAccelDC  = $deathCross -and ($gapChange -gt 1.0)   # crash-acceleration bar already set deathCross=true above
+    [bool]$isCrashAccelDC  = $deathCross -and ($gapChange -gt 1.0)
     [double]$rvolThreshDC  = if ($isCrashAccelDC) { 0.8 } elseif ($isOpeningBarDC -or $isStrongMoveDC) { 1.0 } else { 1.5 }
-    elseif ($deathCross -and $curP -lt $ema9Curr -and $curP -lt $ema21Curr -and (-not $abvVwap) -and $rvol -gt $rvolThreshDC) {
+    # Use standalone if (NOT elseif) — elseif after variable declarations breaks PowerShell chain
+    if (-not $goldenCross -and $deathCross -and $curP -lt $ema9Curr -and $curP -lt $ema21Curr -and (-not $abvVwap) -and $rvol -gt $rvolThreshDC) {
         $crossesDetected++
         [int]$dcConf = 80
         if ($rvol -gt 2.5){$dcConf+=5}; if ($rvol -gt 4.0){$dcConf+=4}
@@ -322,10 +358,11 @@ foreach ($sym in $Tickers) {
         $dcMsg += $EQ+"`n"
         $dcMsg += "v1-DC | "+$nowET.ToString("HH:mm")+" ET | "+$sym
 
+        Set-StateVal ("DC_"+$sym) $true
         Send-TG $dcMsg
         Write-Host ("  >>> S25 DEATH CROSS FIRED: "+$sym+" @ "+$curP+" | Conf="+$dcConf+"% | RVOL="+$rvol+"x")
     }
-    else {
+    if (-not $goldenCross -and -not $deathCross) {
         Write-Host ("  No cross detected")
     }
 }
