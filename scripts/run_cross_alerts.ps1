@@ -189,12 +189,25 @@ foreach ($sym in $Tickers) {
     # Opening-bar gap detection: catches gap-down (DC) / gap-up (GC) opens where
     # EMA9 never had a bar ABOVE EMA21 but gapped straight below at open.
     # Fires once when prev bars are nearly equal (opening calc) and curr diverges.
-    [double]$prevDiff = [Math]::Abs($ema9Prev - $ema21Prev)
+    [double]$prevDiff   = [Math]::Abs($ema9Prev - $ema21Prev)
+    [double]$currGap    = $ema9Curr - $ema21Curr   # negative = DC, positive = GC
+    [double]$prevGap    = $ema9Prev - $ema21Prev
+
+    # Opening-bar gap detection (first bars, EMAs nearly equal then diverge)
     if ($prevDiff -lt 0.15) {
         if (-not $goldenCross -and -not $deathCross) {
             if ($ema9Curr -lt $ema21Curr -and ($ema21Curr - $ema9Curr) -gt 0.05) { $deathCross = $true }
             if ($ema9Curr -gt $ema21Curr -and ($ema9Curr - $ema21Curr) -gt 0.05) { $goldenCross = $true }
         }
+    }
+
+    # Intraday crash/surge detection: EMA gap accelerates significantly in one bar
+    # Catches crashes like META $14 drop in single 5-min candle when already in DC
+    # Uses absolute gap-change threshold (not ATR-relative) to handle large-ATR stocks
+    [double]$gapChange = [Math]::Abs($currGap - $prevGap)
+    if ($gapChange -gt 1.0 -and -not $goldenCross -and -not $deathCross) {
+        if ($currGap -lt 0 -and $ema9Curr -lt $ema21Curr) { $deathCross = $true }  # accelerating DC crash
+        if ($currGap -gt 0 -and $ema9Curr -gt $ema21Curr) { $goldenCross = $true } # accelerating GC surge
     }
 
     [bool]$atEMA9      = ([Math]::Abs($curP - $ema9Curr) -lt ($atr * 0.3))
@@ -203,7 +216,11 @@ foreach ($sym in $Tickers) {
     Write-Host ("  GC="+$goldenCross+" DC="+$deathCross+"  Price="+$curP+"  VWAP="+$vwap+"  RVOL="+$rvol+"x")
 
     # ---- S24: GOLDEN CROSS ----
-    if ($goldenCross -and $curP -gt $ema9Curr -and $curP -gt $ema21Curr -and $abvVwap -and $rvol -gt 1.5) {
+    # RVOL threshold: standard = 1.5x | opening-bar gap-up = 1.0x | strong move = 1.0x
+    [bool]$isOpeningBarGC  = ($prevDiff -lt 0.15) -and $goldenCross
+    [bool]$isStrongMoveGC  = $goldenCross -and ([Math]::Abs($ema9Curr - $ema21Curr) -gt ($atr * 0.25))
+    [double]$rvolThreshGC  = if ($isOpeningBarGC -or $isStrongMoveGC) { 1.0 } else { 1.5 }
+    if ($goldenCross -and $curP -gt $ema9Curr -and $curP -gt $ema21Curr -and $abvVwap -and $rvol -gt $rvolThreshGC) {
         $crossesDetected++
         [int]$gcConf = 82
         if ($rvol -gt 2.5){$gcConf+=5}; if ($rvol -gt 4.0){$gcConf+=4}
@@ -254,7 +271,12 @@ foreach ($sym in $Tickers) {
     }
 
     # ---- S25: DEATH CROSS ----
-    elseif ($deathCross -and $curP -lt $ema9Curr -and $curP -lt $ema21Curr -and (-not $abvVwap) -and $rvol -gt 1.5) {
+    # RVOL threshold: standard = 1.5x | opening-bar gap-down = 1.0x | strong move (>2xATR gap) = 1.0x
+    [bool]$isOpeningBarDC  = ($prevDiff -lt 0.15) -and $deathCross
+    [bool]$isStrongMoveDC  = $deathCross -and ([Math]::Abs($ema9Curr - $ema21Curr) -gt ($atr * 0.25))
+    [bool]$isCrashAccelDC  = $deathCross -and ($gapChange -gt 1.0)   # crash-acceleration bar already set deathCross=true above
+    [double]$rvolThreshDC  = if ($isCrashAccelDC) { 0.8 } elseif ($isOpeningBarDC -or $isStrongMoveDC) { 1.0 } else { 1.5 }
+    elseif ($deathCross -and $curP -lt $ema9Curr -and $curP -lt $ema21Curr -and (-not $abvVwap) -and $rvol -gt $rvolThreshDC) {
         $crossesDetected++
         [int]$dcConf = 80
         if ($rvol -gt 2.5){$dcConf+=5}; if ($rvol -gt 4.0){$dcConf+=4}
