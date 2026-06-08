@@ -34,8 +34,11 @@ if ($dow -lt 1 -or $dow -gt 5 -or $etMins -lt 570 -or $etMins -gt 960) {
     exit 0
 }
 
-$sessionSt = $todayDate + "T13:30:00Z"
-$expDate   = $todayDate.Substring(5,2)+"/"+$todayDate.Substring(8,2)
+$sessionSt  = $todayDate + "T13:30:00Z"
+# Seed start: fetch 5 calendar days back to guarantee 2 full trading days for EMA seeding
+# This ensures EMA9/EMA21 are properly initialized before today's open (like TradingView)
+$seedStart  = $nowUtc.AddDays(-5).ToString("yyyy-MM-dd") + "T13:30:00Z"
+$expDate    = $todayDate.Substring(5,2)+"/"+$todayDate.Substring(8,2)
 $EQ        = "=" * 48
 $DV        = "-" * 46
 
@@ -47,8 +50,24 @@ Write-Host ("=== Cross Alert Scan @ "+$nowET.ToString("HH:mm")+" ET  "+$todayDat
 function fmt([double]$v) { return "$" + [Math]::Round($v,2).ToString("F2") }
 
 function Get-5MinBars([string]$s) {
-    $url = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe=5Min&start="+$sessionSt+"&limit=100&feed=iex&sort=asc"
-    try { return @((Invoke-RestMethod -Uri $url -Headers $hdr).bars) } catch { return @() }
+    # Fetch last 100 bars DESC (most recent first) to guarantee today is included
+    # Then reverse to ASC for proper chronological EMA calculation
+    # Seeds EMA9/EMA21 with prior session data — matches TradingView continuous EMA
+    $url = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe=5Min&limit=100&feed=iex&sort=desc"
+    try {
+        $raw = @((Invoke-RestMethod -Uri $url -Headers $hdr).bars)
+        if ($raw.Count -eq 0) { return @() }
+        [Array]::Reverse($raw)
+        return $raw
+    } catch { return @() }
+}
+
+function Get-TodayBars([object[]]$allBars) {
+    # Filter to only today's session bars (9:30 AM ET onward) for VWAP/RVOL/ATR
+    $cutoff = [DateTime]::Parse($sessionSt).ToUniversalTime()
+    return @($allBars | Where-Object {
+        try { [DateTime]::Parse($_.t).ToUniversalTime() -ge $cutoff } catch { $false }
+    })
 }
 
 function Get-LastPrice([string]$s) {
@@ -168,19 +187,29 @@ function Set-StateVal([string]$key,[bool]$val) {
 foreach ($sym in $Tickers) {
     Write-Host ("`n["+$sym+"] scanning...")
 
-    $bars5m = @(Get-5MinBars $sym)
-    if ($bars5m.Count -lt 2) {
-        Write-Host ("  Insufficient bars ("+$bars5m.Count+") -- need 2+ 5-min bars, skip")
+    # Fetch ALL bars (seeded: last 2 trading days) for accurate EMA initialization
+    $allBars  = @(Get-5MinBars $sym)
+    # Today's bars only — used for VWAP, RVOL, bar count
+    $bars5m   = @(Get-TodayBars $allBars)
+
+    if ($allBars.Count -lt 2) {
+        Write-Host ("  Insufficient bars ("+$allBars.Count+") -- need 2+ bars total, skip")
+        continue
+    }
+    if ($bars5m.Count -lt 1) {
+        Write-Host ("  No today bars yet -- market just opened, skip")
         continue
     }
 
-    # Build EMA series on 5-min closes
-    [double[]]$closes5m = @($bars5m | ForEach-Object { [double]$_.c })
-    $ema9Series  = @(Calc-EMA-Series $closes5m 9)
-    $ema21Series = @(Calc-EMA-Series $closes5m 21)
+    # Build EMA series on ALL bars (seeded) — this matches TradingView's continuous EMA calculation
+    # With 2+ days of data, EMA9/EMA21 are properly initialized before today's open
+    [double[]]$allCloses = @($allBars | ForEach-Object { [double]$_.c })
+    $ema9Series  = @(Calc-EMA-Series $allCloses 9)
+    $ema21Series = @(Calc-EMA-Series $allCloses 21)
 
     if ($ema9Series.Count -lt 2 -or $ema21Series.Count -lt 2) { continue }
 
+    # Use last 2 values for cross detection (most recent = current bar, one before = prev bar)
     [int]$last  = $ema9Series.Count - 1
     [int]$prev  = $last - 1
 
@@ -189,9 +218,9 @@ foreach ($sym in $Tickers) {
     [double]$ema21Curr = $ema21Series[$last]
     [double]$ema21Prev = $ema21Series[$prev]
 
-    # Current market data
+    # Current market data — use TODAY's bars for VWAP/ATR/RVOL (intraday session only)
     [double]$curP  = Get-LastPrice $sym
-    if ($curP -eq 0.0) { $curP = $closes5m[-1] }
+    if ($curP -eq 0.0) { $curP = [double]$bars5m[-1].c }
     [double]$vwap  = Calc-VWAP $bars5m
     [double]$atr   = Calc-ATR  $bars5m 14
     if ($atr -lt 0.01) { $atr = $curP * 0.01 }
