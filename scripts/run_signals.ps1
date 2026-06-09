@@ -43,6 +43,26 @@ function Get-Bars([string]$s,[string]$tf,[string]$start,[int]$lim=100,[bool]$ext
     try { return @((Invoke-RestMethod -Uri $url -Headers $hdr).bars) } catch { return @() }
 }
 
+function Get-5MinSeeded([string]$s) {
+    # FIX: Fetch last 100 5-min bars DESC (most recent first) then reverse to ASC
+    # This seeds EMA9/EMA21 with prior session data — matches TradingView continuous EMA
+    # REPLACES the daily+intraday blend for intraday EMAs to prevent false direction signals
+    $url = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe=5Min&limit=100&feed=iex&sort=desc"
+    try {
+        $raw = @((Invoke-RestMethod -Uri $url -Headers $hdr).bars)
+        if ($raw.Count -eq 0) { return @() }
+        [Array]::Reverse($raw)
+        return $raw
+    } catch { return @() }
+}
+
+function Get-TodayBarsOnly([object[]]$allBars,[string]$sessionStart) {
+    $cutoff = [DateTime]::Parse($sessionStart).ToUniversalTime()
+    return @($allBars | Where-Object {
+        try { [DateTime]::Parse($_.t).ToUniversalTime() -ge $cutoff } catch { $false }
+    })
+}
+
 function Get-LastPrice([string]$s,[bool]$extHours=$false) {
     # Pre-market: sip feed (Algo Trader); market hours: iex feed (faster)
     $feed = if ($extHours) { "sip" } else { "iex" }
@@ -269,9 +289,15 @@ foreach ($sym in $Tickers) {
     [double]$gapPct = if ($prevClose -gt 0){[Math]::Round(($gapRef-$prevClose)/$prevClose*100.0,2)}else{0.0}
     $gapStr         = if ($gapPct -ge 0){"+" + $gapPct + "%"}else{$gapPct.ToString()+"%"}
 
-    # -- 5-min intraday bars --
+    # -- 5-min intraday bars (today only for VWAP/RVOL/ATR) --
     $idays       = @(Get-Bars $sym "5Min" $sessionSt 80)
     [bool]$hasID = ($idays.Count -ge 2)
+
+    # -- Seeded 5-min bars: last 100 bars (multi-day seed) for accurate EMA9/EMA21/EMA50 --
+    # This matches TradingView's continuous EMA calculation — fixes false direction signals
+    $seeded5m    = @(Get-5MinSeeded $sym)
+    $today5m     = @(Get-TodayBarsOnly $seeded5m $sessionSt)
+    [bool]$hasSeed = ($seeded5m.Count -ge 9)
 
     # -- 1-min intraday bars (scalp timeframe) --
     $bars1m        = @(Get-Bars $sym "1Min" $sessionSt 200)
@@ -289,10 +315,13 @@ foreach ($sym in $Tickers) {
     [double]$iATR  = if ($idays.Count -ge 14){Calc-ATR $idays 14}else{0.0}
     [double]$atr   = if ($iATR -gt ($atrDaily*0.3)){$iATR}else{$atrDaily}
     [double]$rsi   = Calc-RSI  $blend 14
-    [double]$ema9  = Calc-EMA  $blend 9
-    [double]$ema20 = Calc-EMA  $blend 20   # v8: EMA20 (was EMA21)
-    [double]$ema21 = $ema20                 # alias kept for compatibility
-    [double]$ema50 = Calc-EMA  $blend 50
+    # FIX: Use seeded 5-min closes for EMA9/EMA21/EMA50 — matches TradingView continuous EMA
+    # Previously used daily+intraday blend which gave wrong EMA values (e.g. EMA9=290 vs TV=295)
+    [double[]]$seed5mC = if ($hasSeed){ @($seeded5m|ForEach-Object{[double]$_.c}) }else{ $blend }
+    [double]$ema9  = Calc-EMA  $seed5mC 9
+    [double]$ema20 = Calc-EMA  $seed5mC 20   # v8: EMA20 (was EMA21)
+    [double]$ema21 = $ema20                    # alias kept for compatibility
+    [double]$ema50 = Calc-EMA  $seed5mC 50
     [double]$vwap  = if ($hasID){Calc-VWAP $idays}elseif($hasPM){Calc-VWAP $pmBars}else{$prevClose}
 
     # -- 1-min indicators for scalp --
