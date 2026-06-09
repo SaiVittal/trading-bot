@@ -6,7 +6,7 @@
 # ============================================================
 
 param(
-    [string[]]$Tickers  = @("APP","TSLA","NVDA","INTC","AAPL","QQQ","SPY","META","IWM","MSFT"),
+    [string[]]$Tickers  = @("APP","TSLA","NVDA","INTC","AAPL","QQQ","SPY","META","IWM","MSFT","GLD","NBIS","MRVL","NOW","GOOGL","LLY","AMD","AVGO","ARM","IBM","COST"),
     [string]$ApiKey     = "PKUVZN3EUNDEDFIIWS3NHWMKXK",
     [string]$ApiSecret  = "2otPyywguF8Xn2mgCwgLifEbP9s8RrbLF9mjVn95EjXo",
     [string]$TgToken    = "8752800861:AAGUp376nhu0E-PoFhuKmx9-x572qUO95kw",
