@@ -10,5 +10,29 @@
     "alpaca_order_id": "245f9f88-3a2b-4f9c-ba4f-b525aea0ed33",
     "status": "pending_new",
     "raw_alert": "\ud83d\udcc8 MOMENTUM BUY AAPL 1 shares | Market"
+  },
+  {
+    "timestamp": "2026-06-10T17:53:36.862962+00:00",
+    "signal_type": "momentum",
+    "symbol": "AAPL",
+    "side": "buy",
+    "order_type": "market",
+    "qty": 1.0,
+    "notional": null,
+    "alpaca_order_id": "c1245d54-f133-40ad-8261-fcd0f58fe8e4",
+    "status": "pending_new",
+    "raw_alert": "\ud83d\udcc8 MOMENTUM BUY AAPL 1 shares | Market"
+  },
+  {
+    "timestamp": "2026-06-10T17:53:43.712706+00:00",
+    "signal_type": "momentum",
+    "symbol": "AAPL",
+    "side": "buy",
+    "order_type": "market",
+    "qty": 1.0,
+    "notional": null,
+    "alpaca_order_id": "30e2f5a3-7f40-4afa-9418-ccd3c812605b",
+    "status": "pending_new",
+    "raw_alert": "MOMENTUM BUY AAPL 1 shares | Market"
   }
 ]
