@@ -1,0 +1,14 @@
+[
+  {
+    "timestamp": "2026-06-10T17:28:31.408206+00:00",
+    "signal_type": "momentum",
+    "symbol": "AAPL",
+    "side": "buy",
+    "order_type": "market",
+    "qty": 1.0,
+    "notional": null,
+    "alpaca_order_id": "245f9f88-3a2b-4f9c-ba4f-b525aea0ed33",
+    "status": "pending_new",
+    "raw_alert": "\ud83d\udcc8 MOMENTUM BUY AAPL 1 shares | Market"
+  }
+]
