@@ -6,12 +6,22 @@
 # ============================================================
 
 param(
-    [string[]]$Tickers  = @("APP","TSLA","NVDA","INTC","AAPL","QQQ","SPY","META","IWM","MSFT","GLD","NBIS","MRVL","NOW","GOOGL","LLY","AMD","AVGO","ARM","IBM","COST"),
-    [string]$ApiKey     = "PKUVZN3EUNDEDFIIWS3NHWMKXK",
-    [string]$ApiSecret  = "2otPyywguF8Xn2mgCwgLifEbP9s8RrbLF9mjVn95EjXo",
-    [string]$TgToken    = "8752800861:AAGUp376nhu0E-PoFhuKmx9-x572qUO95kw",
-    [string]$TgChat     = "-4999357279"
+    [string[]]$Tickers  = @("APP","TSLA","NVDA","QQQ","SPY","META","IWM","MSFT","AMZN","AAPL","INTC","NOW","GLD"),
+    [string]$ApiKey         = "PKEQAQFOVYKIWW64RCEYJJD7N4",
+    [string]$ApiSecret      = "Hxc6xXX3VRc25t6mx1r3HEE9u5WzYVrucWjKVyw7j1u4",
+    [string]$AlpacaKey      = "",
+    [string]$AlpacaSecret   = "",
+    [string]$TgToken        = "8752800861:AAGUp376nhu0E-PoFhuKmx9-x572qUO95kw",
+    [string]$TelegramToken  = "",
+    [string]$TgChat         = "-4999357279",
+    [string]$ChatId         = ""
 )
+
+# Accept alternate param names
+if ($AlpacaKey    -ne "") { $ApiKey    = $AlpacaKey }
+if ($AlpacaSecret -ne "") { $ApiSecret = $AlpacaSecret }
+if ($TelegramToken -ne "") { $TgToken  = $TelegramToken }
+if ($ChatId       -ne "") { $TgChat    = $ChatId }
 
 $ErrorActionPreference = "SilentlyContinue"
 $hdr     = @{ "APCA-API-KEY-ID" = $ApiKey; "APCA-API-SECRET-KEY" = $ApiSecret }
