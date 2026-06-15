@@ -1,11 +1,14 @@
 # ============================================================
-# Trading Bot Signal Runner  v8
+# Trading Bot Signal Runner  v9
 # Signals : Opening Drive | 0DTE | Swing | SCALP | MOMENTUM
 # v6 fixes : BBW gate | VWAP Reclaim signal | Capitulation flush detection
 #             Daily-trend soft penalty | Failed-breakdown reversal pattern
 # v8 fixes : EMA20 (was EMA21) | Prev Day High/Low | Vol 150% hard check
 #             Opening Range = 15 min (3 bars) | Consensus threshold 85%
 #             Max 3 signals limiter | Risk/Reward 1:2 enforced | PDH/PDL signals
+# v9 fixes : Hard gate: Trend=UP required for LONG alerts (blocks NEUTRAL/DOWN)
+#             RSI ceiling: LONG blocked when RSI >= 70 (overbought = no new entries)
+#             EMA gap minimum: EMA9 must exceed EMA21 by >= 0.10 (blocks stale near-zero GC)
 # Branch  : feat/scalp-momentum-signals
 #
 # RULE: No price variable ever goes inside a double-quoted string.
@@ -244,7 +247,7 @@ if (-not $isWeekday -or -not $isInWindow) {
 $EQ = "=" * 48
 $DV = "-" * 46
 
-Write-Host ("=== Signal Run v8 @ "+$nowET.ToString("HH:mm")+" ET  "+$todayDate+" ===")
+Write-Host ("=== Signal Run v9 @ "+$nowET.ToString("HH:mm")+" ET  "+$todayDate+" ===")
 
 $summary = @()
 
@@ -357,6 +360,7 @@ foreach ($sym in $Tickers) {
     [bool]$abvEMA9  = ($curP -gt $ema9)
     [bool]$abvVWAP  = ($curP -gt $vwap -and $vwap -gt 0)
     [string]$trend  = if($ema9 -gt $ema21 -and $ema21 -gt $ema50){"UP"}elseif($ema9 -lt $ema21){"DOWN"}else{"NEUTRAL"}
+    [double]$emaGap = [Math]::Round($ema9 - $ema21, 2)   # v9: EMA9 minus EMA21 gap for minimum threshold filter
     [string]$dTrend = if($dEMA9 -gt $dEMA21 -and $dEMA21 -gt $dEMA50){"UPTREND"}
                       elseif($dEMA9 -lt $dEMA21){"DOWNTREND"}else{"SIDEWAYS"}
 
@@ -701,6 +705,23 @@ foreach ($sym in $Tickers) {
 
     # v8: Consensus threshold raised to 85% (was 78%) per filtering rules
     [bool]$consensus = ($fired.Count -ge 2) -or ($topAll -ge 85)
+
+    # v9: HARD GATES — applied after consensus, prevent false LONG alerts:
+    # Gate 1: Trend=UP required for LONG (NEUTRAL/DOWN = price action contradicts EMA state)
+    # Gate 2: RSI < 70 required for LONG (overbought = chasing, not timing)
+    # Gate 3: EMA gap >= 0.10 required for LONG (< 0.10 = stale near-zero GC, about to flip)
+    if ($dir -eq "LONG" -and $consensus) {
+        if ($trend -ne "UP") {
+            $consensus = $false
+            Write-Host ("  [v9] LONG blocked: Trend="+$trend+" (requires UP -- EMA9>EMA21>EMA50)")
+        } elseif ($rsi -ge 70) {
+            $consensus = $false
+            Write-Host ("  [v9] LONG blocked: RSI="+$rsi+" >= 70 (overbought -- no new entries)")
+        } elseif ($emaGap -lt 0.10) {
+            $consensus = $false
+            Write-Host ("  [v9] LONG blocked: EMA gap="+$emaGap+" < 0.10 (stale GC -- cross too weak)")
+        }
+    }
 
     # v8: Max 3 active signals — keep only top 3 by confidence score
     if ($fired.Count -gt 3) {
@@ -1135,7 +1156,7 @@ foreach ($sym in $Tickers) {
     }
 
     $msg += $EQ+"`n"
-    $msg += "v8 | "+$nowET.ToString("HH:mm")+" ET | "+$sym
+    $msg += "v9 | "+$nowET.ToString("HH:mm")+" ET | "+$sym
 
     Send-TG $msg
 
