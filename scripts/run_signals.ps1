@@ -1,5 +1,5 @@
 # ============================================================
-# Trading Bot Signal Runner  v9
+# Trading Bot Signal Runner  v10
 # Signals : Opening Drive | 0DTE | Swing | SCALP | MOMENTUM
 # v6 fixes : BBW gate | VWAP Reclaim signal | Capitulation flush detection
 #             Daily-trend soft penalty | Failed-breakdown reversal pattern
@@ -11,7 +11,10 @@
 #             EMA gap minimum: EMA9 must exceed EMA21 by >= 0.10 (blocks stale near-zero GC)
 #             RSI ceiling OD exemption: gap-up OD signals bypass RSI >= 70 gate (RSI 75-90
 #             is normal pre-market for valid gap plays — blocking kills all OD entries)
-# Branch  : feat/scalp-momentum-signals
+# v10 fixes: Bar lookback 100 -> 250 bars for proper EMA seeding (matches TradingView)
+#             Trend gate EMA50 -> EMA200 to match TradingView yellow EMA200 line
+#             Fixes Trend=NEUTRAL false block: with 100 bars EMA50 collapsed to EMA21 value
+# Branch  : fix/ema200-trend-gate
 #
 # RULE: No price variable ever goes inside a double-quoted string.
 #       All prices use fmt() + pure concatenation only.
@@ -49,10 +52,11 @@ function Get-Bars([string]$s,[string]$tf,[string]$start,[int]$lim=100,[bool]$ext
 }
 
 function Get-5MinSeeded([string]$s) {
-    # FIX: Fetch last 100 5-min bars DESC (most recent first) then reverse to ASC
-    # This seeds EMA9/EMA21 with prior session data — matches TradingView continuous EMA
-    # REPLACES the daily+intraday blend for intraday EMAs to prevent false direction signals
-    $url = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe=5Min&limit=100&feed=iex&sort=desc"
+    # v10: Fetch last 250 5-min bars DESC (most recent first) then reverse to ASC
+    # 250 bars = ~20 hours of 5-min data — enough for EMA200 to converge properly
+    # 100 bars was too few: EMA50 collapsed to EMA21 value causing false Trend=NEUTRAL
+    # Matches TradingView which seeds EMAs from weeks of continuous history
+    $url = $baseUrl+"/v2/stocks/"+$s+"/bars?timeframe=5Min&limit=250&feed=iex&sort=desc"
     try {
         $raw = @((Invoke-RestMethod -Uri $url -Headers $hdr).bars)
         if ($raw.Count -eq 0) { return @() }
@@ -249,7 +253,7 @@ if (-not $isWeekday -or -not $isInWindow) {
 $EQ = "=" * 48
 $DV = "-" * 46
 
-Write-Host ("=== Signal Run v9 @ "+$nowET.ToString("HH:mm")+" ET  "+$todayDate+" ===")
+Write-Host ("=== Signal Run v10 @ "+$nowET.ToString("HH:mm")+" ET  "+$todayDate+" ===")
 
 $summary = @()
 
@@ -323,10 +327,11 @@ foreach ($sym in $Tickers) {
     # FIX: Use seeded 5-min closes for EMA9/EMA21/EMA50 — matches TradingView continuous EMA
     # Previously used daily+intraday blend which gave wrong EMA values (e.g. EMA9=290 vs TV=295)
     [double[]]$seed5mC = if ($hasSeed){ @($seeded5m|ForEach-Object{[double]$_.c}) }else{ $blend }
-    [double]$ema9  = Calc-EMA  $seed5mC 9
-    [double]$ema20 = Calc-EMA  $seed5mC 20   # v8: EMA20 (was EMA21)
-    [double]$ema21 = $ema20                    # alias kept for compatibility
-    [double]$ema50 = Calc-EMA  $seed5mC 50
+    [double]$ema9   = Calc-EMA  $seed5mC 9
+    [double]$ema20  = Calc-EMA  $seed5mC 20   # v8: EMA20 (was EMA21)
+    [double]$ema21  = $ema20                   # alias kept for compatibility
+    [double]$ema50  = Calc-EMA  $seed5mC 50   # kept for legacy signal checks
+    [double]$ema200 = Calc-EMA  $seed5mC 200  # v10: used for Trend gate (matches TradingView yellow line)
     [double]$vwap  = if ($hasID){Calc-VWAP $idays}elseif($hasPM){Calc-VWAP $pmBars}else{$prevClose}
 
     # -- 1-min indicators for scalp --
@@ -361,7 +366,9 @@ foreach ($sym in $Tickers) {
 
     [bool]$abvEMA9  = ($curP -gt $ema9)
     [bool]$abvVWAP  = ($curP -gt $vwap -and $vwap -gt 0)
-    [string]$trend  = if($ema9 -gt $ema21 -and $ema21 -gt $ema50){"UP"}elseif($ema9 -lt $ema21){"DOWN"}else{"NEUTRAL"}
+    # v10: Trend gate uses EMA200 (matches TradingView yellow line) instead of EMA50
+    # EMA50 with 100 bars collapsed to EMA21 value — EMA200 with 250 bars converges properly
+    [string]$trend  = if($ema9 -gt $ema21 -and $ema21 -gt $ema200){"UP"}elseif($ema9 -lt $ema21){"DOWN"}else{"NEUTRAL"}
     [double]$emaGap = [Math]::Round($ema9 - $ema21, 2)   # v9: EMA9 minus EMA21 gap for minimum threshold filter
     [string]$dTrend = if($dEMA9 -gt $dEMA21 -and $dEMA21 -gt $dEMA50){"UPTREND"}
                       elseif($dEMA9 -lt $dEMA21){"DOWNTREND"}else{"SIDEWAYS"}
@@ -623,10 +630,10 @@ foreach ($sym in $Tickers) {
     }
 
     # MO02: RSI Momentum Thrust -- RSI 60-76 with full EMA alignment
-    if ($rsi -gt 60 -and $rsi -lt 77 -and $ema9 -gt $ema21 -and $ema21 -gt $ema50 -and $abvVWAP) {
+    if ($rsi -gt 60 -and $rsi -lt 77 -and $ema9 -gt $ema21 -and $ema21 -gt $ema200 -and $abvVWAP) {
         [int]$c=78; if($rsi -gt 68){$c+=5}; if($rvol -gt 2.0){$c+=4}
         $c=[Math]::Min($c,95)
-        $raw.Add("MOMENTUM|MO02|RSI Momentum Thrust|LONG|CALL|"+$c+"|RSI="+$rsi+" in momentum zone. EMA9 > EMA21 > EMA50 fully aligned. Strong CALL -- momentum continuation.")
+        $raw.Add("MOMENTUM|MO02|RSI Momentum Thrust|LONG|CALL|"+$c+"|RSI="+$rsi+" in momentum zone. EMA9 > EMA21 > EMA200 fully aligned. Strong CALL -- momentum continuation.")
     }
 
     # MO03: Gap Momentum -- large gap with intraday confirmation
@@ -718,7 +725,7 @@ foreach ($sym in $Tickers) {
     if ($dir -eq "LONG" -and $consensus) {
         if ($trend -ne "UP") {
             $consensus = $false
-            Write-Host ("  [v9] LONG blocked: Trend="+$trend+" (requires UP -- EMA9>EMA21>EMA50)")
+            Write-Host ("  [v10] LONG blocked: Trend="+$trend+" (requires UP -- EMA9>EMA21>EMA200)")
         } elseif ($rsi -ge 70 -and -not $hasODSignal) {
             $consensus = $false
             Write-Host ("  [v9] LONG blocked: RSI="+$rsi+" >= 70 (overbought -- no OD signal to exempt)")
@@ -1090,7 +1097,7 @@ foreach ($sym in $Tickers) {
     $msg += $DV+"`n"
     $msg += "RSI(14)    : "+$rsi+"    RSI(1m): "+$rsi1m+"`n"
     $msg += "EMA9       : "+$ema9+"  EMA21: "+$ema21+"`n"
-    $msg += "EMA50      : "+$ema50+"  ATR : "+$atr+"`n"
+    $msg += "EMA200     : "+$ema200+"  ATR : "+$atr+"`n"
     $msg += "RVOL       : "+$rvol+"x   VWAP: "+$vwap+"`n"
     [string]$bbwStr = if ($bbwValid) { ([string]$bbw)+"%" } else { "N/A (<"+$bars1m.Count+" bars)" }
     $msg += "BB Width   : "+$bbwStr+"  VolSpike: "+$volSpike+"x`n"
@@ -1163,7 +1170,7 @@ foreach ($sym in $Tickers) {
     }
 
     $msg += $EQ+"`n"
-    $msg += "v9 | "+$nowET.ToString("HH:mm")+" ET | "+$sym
+    $msg += "v10 | "+$nowET.ToString("HH:mm")+" ET | "+$sym
 
     Send-TG $msg
 
