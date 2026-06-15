@@ -9,6 +9,8 @@
 # v9 fixes : Hard gate: Trend=UP required for LONG alerts (blocks NEUTRAL/DOWN)
 #             RSI ceiling: LONG blocked when RSI >= 70 (overbought = no new entries)
 #             EMA gap minimum: EMA9 must exceed EMA21 by >= 0.10 (blocks stale near-zero GC)
+#             RSI ceiling OD exemption: gap-up OD signals bypass RSI >= 70 gate (RSI 75-90
+#             is normal pre-market for valid gap plays — blocking kills all OD entries)
 # Branch  : feat/scalp-momentum-signals
 #
 # RULE: No price variable ever goes inside a double-quoted string.
@@ -709,14 +711,19 @@ foreach ($sym in $Tickers) {
     # v9: HARD GATES — applied after consensus, prevent false LONG alerts:
     # Gate 1: Trend=UP required for LONG (NEUTRAL/DOWN = price action contradicts EMA state)
     # Gate 2: RSI < 70 required for LONG (overbought = chasing, not timing)
+    #         EXEMPTION: OD signals bypass RSI ceiling — gap-up stocks naturally run RSI 75-90
+    #         pre-market as the move develops. Blocking OD at RSI >= 70 kills all valid gap plays.
     # Gate 3: EMA gap >= 0.10 required for LONG (< 0.10 = stale near-zero GC, about to flip)
+    [bool]$hasODSignal = ($odSigs.Count -gt 0)
     if ($dir -eq "LONG" -and $consensus) {
         if ($trend -ne "UP") {
             $consensus = $false
             Write-Host ("  [v9] LONG blocked: Trend="+$trend+" (requires UP -- EMA9>EMA21>EMA50)")
-        } elseif ($rsi -ge 70) {
+        } elseif ($rsi -ge 70 -and -not $hasODSignal) {
             $consensus = $false
-            Write-Host ("  [v9] LONG blocked: RSI="+$rsi+" >= 70 (overbought -- no new entries)")
+            Write-Host ("  [v9] LONG blocked: RSI="+$rsi+" >= 70 (overbought -- no OD signal to exempt)")
+        } elseif ($rsi -ge 70 -and $hasODSignal) {
+            Write-Host ("  [v9] RSI="+$rsi+" >= 70 but OD signal present -- RSI gate exempted for gap-up OD play")
         } elseif ($emaGap -lt 0.10) {
             $consensus = $false
             Write-Host ("  [v9] LONG blocked: EMA gap="+$emaGap+" < 0.10 (stale GC -- cross too weak)")
