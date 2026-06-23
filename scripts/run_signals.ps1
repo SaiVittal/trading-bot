@@ -747,12 +747,12 @@ foreach ($sym in $Tickers) {
     # Fix: Trend=DOWN + price > 0.8x ATR below VWAP + MO fires >=75% => allow SHORT consensus.
     # RSI1m extreme oversold (<20) on SHORT confirms the down move — do NOT treat as bounce block.
     [double]$vwapDropDist    = if($vwap -gt 0){ [Math]::Round($vwap - $curP, 2) }else{ 0.0 }
-    [bool]$deepBelowVwap     = ($vwapDropDist -gt ($atr * 0.8)) -and (-not $abvVWAP)
+    [bool]$deepBelowVwap     = ($vwapDropDist -gt ($atr * 0.3)) -and (-not $abvVWAP)
     [bool]$shortOverrideFired = $false
     if ($dir -eq "SHORT" -and $trend -eq "DOWN" -and $deepBelowVwap -and $topMO -ge 75 -and -not $consensus) {
         $consensus            = $true
         $shortOverrideFired   = $true
-        Write-Host ("  [v11] SHORT override: Trend=DOWN + "+$vwapDropDist+" below VWAP (>0.8xATR="+([Math]::Round($atr*0.8,2))+") + MO="+$topMO+"%")
+        Write-Host ("  [v11] SHORT override: Trend=DOWN + "+$vwapDropDist+" below VWAP (>0.3xATR="+([Math]::Round($atr*0.3,2))+") + MO="+$topMO+"%")
     }
 
     # v8: Max 3 active signals — keep only top 3 by confidence score
@@ -1165,7 +1165,7 @@ foreach ($sym in $Tickers) {
         $triggerNote = if ($dir -eq "LONG") {
             "LONG trigger: price reclaims VWAP "+(fmt $vwap)+" + OD/SC engine fires"
         } elseif ($trend -eq "DOWN" -and $topMO -ge 75) {
-            "SHORT trigger: MO="+$topMO+"% + Trend=DOWN -- needs price "+([Math]::Round($atr*0.8,2))+" below VWAP "+(fmt $vwap)+" (currently "+$vwapDropDist+" below) [v11 low-RVOL override]"
+            "SHORT trigger: MO="+$topMO+"% + Trend=DOWN -- needs price "+([Math]::Round($atr*0.3,2))+" below VWAP "+(fmt $vwap)+" (currently "+$vwapDropDist+" below) [v11 low-RVOL override]"
         } else {
             "SHORT trigger: price breaks below "+(fmt ($vwap - $atr*0.3))+" + SC engine fires"
         }
