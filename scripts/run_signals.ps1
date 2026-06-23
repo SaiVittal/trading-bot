@@ -14,6 +14,10 @@
 # v10 fixes: Bar lookback 100 -> 250 bars for proper EMA seeding (matches TradingView)
 #             Trend gate EMA50 -> EMA200 to match TradingView yellow EMA200 line
 #             Fixes Trend=NEUTRAL false block: with 100 bars EMA50 collapsed to EMA21 value
+# v11 fixes: SHORT consensus override for low-RVOL downtrends
+#             When RVOL < 1.0x, SC/0DTE engines don't fire leaving MO04 isolated (1 sig = no consensus)
+#             Fix: Trend=DOWN + price > 0.8x ATR below VWAP + MO >= 75% => CONDITIONAL PUT ALERT
+#             RSI1m extreme oversold (<20) on SHORT = confirms down move, not bounce block
 # Branch  : fix/ema200-trend-gate
 #
 # RULE: No price variable ever goes inside a double-quoted string.
@@ -737,6 +741,20 @@ foreach ($sym in $Tickers) {
         }
     }
 
+    # v11: SHORT consensus override — low-RVOL downtrend PUT alert
+    # Problem: When RVOL < 1.0x, SC and 0DTE engines don't fire, leaving MO04 isolated (1 signal).
+    # The existing consensus rule (2 signals OR >=85%) then blocks the PUT alert even when valid.
+    # Fix: Trend=DOWN + price > 0.8x ATR below VWAP + MO fires >=75% => allow SHORT consensus.
+    # RSI1m extreme oversold (<20) on SHORT confirms the down move — do NOT treat as bounce block.
+    [double]$vwapDropDist    = if($vwap -gt 0){ [Math]::Round($vwap - $curP, 2) }else{ 0.0 }
+    [bool]$deepBelowVwap     = ($vwapDropDist -gt ($atr * 0.8)) -and (-not $abvVWAP)
+    [bool]$shortOverrideFired = $false
+    if ($dir -eq "SHORT" -and $trend -eq "DOWN" -and $deepBelowVwap -and $topMO -ge 75 -and -not $consensus) {
+        $consensus            = $true
+        $shortOverrideFired   = $true
+        Write-Host ("  [v11] SHORT override: Trend=DOWN + "+$vwapDropDist+" below VWAP (>0.8xATR="+([Math]::Round($atr*0.8,2))+") + MO="+$topMO+"%")
+    }
+
     # v8: Max 3 active signals — keep only top 3 by confidence score
     if ($fired.Count -gt 3) {
         $fired = @($fired | Select-Object -First 3)
@@ -816,7 +834,9 @@ foreach ($sym in $Tickers) {
     # ============================================================
     #  BUILD TELEGRAM MESSAGE
     # ============================================================
-    [string]$alertHdr = if($consensus){">>> "+$dir+" ALERT FIRES <<<"}else{"WATCH -- below consensus threshold"}
+    [string]$alertHdr = if($consensus -and $shortOverrideFired){">>> "+$dir+" CONDITIONAL PUT ALERT -- low-RVOL override <<<"}
+                        elseif($consensus){">>> "+$dir+" ALERT FIRES <<<"}
+                        else{"WATCH -- below consensus threshold"}
 
     # ---- Time-window check for Opening Drive ----
     # $inODWindow is set globally above (before ticker loop) -- do NOT redefine here
@@ -1144,6 +1164,8 @@ foreach ($sym in $Tickers) {
         # What would trigger a signal
         $triggerNote = if ($dir -eq "LONG") {
             "LONG trigger: price reclaims VWAP "+(fmt $vwap)+" + OD/SC engine fires"
+        } elseif ($trend -eq "DOWN" -and $topMO -ge 75) {
+            "SHORT trigger: MO="+$topMO+"% + Trend=DOWN -- needs price "+([Math]::Round($atr*0.8,2))+" below VWAP "+(fmt $vwap)+" (currently "+$vwapDropDist+" below) [v11 low-RVOL override]"
         } else {
             "SHORT trigger: price breaks below "+(fmt ($vwap - $atr*0.3))+" + SC engine fires"
         }
