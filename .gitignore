@@ -40,6 +40,10 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# Trading bot runtime data (session-generated, not source)
+state/
+reports/
+
 # Logs & Telemetry
 logs/
 *.log
