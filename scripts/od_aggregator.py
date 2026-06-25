@@ -38,6 +38,11 @@ REPO_ROOT  = Path(__file__).resolve().parent.parent
 STATE_DIR  = REPO_ROOT / "state"
 STATE_FILE = STATE_DIR / f"od_state_{date.today()}.json"
 
+TICKERS = {
+    "APP", "TSLA", "NVDA", "QQQ", "SPY", "META", "MSFT", "AMZN",
+    "AAPL", "INTC", "NOW", "HOOD", "PLTR", "NFLX", "NBIS",
+}
+
 RUN_META = {
     1: ("RUN 1/3", "9:05 ET - Early Pre-Market",  "Next Update: 9:20 ET"),
     2: ("RUN 2/3", "9:20 ET - Mid Pre-Market",     "Next Update: 9:35 ET (Final)"),
@@ -212,7 +217,7 @@ def parse_od_alert(text: str) -> dict | None:
 
 
 def is_valid_od(alert: dict) -> bool:
-    return alert["confidence"] >= 60 and alert["rvol"] >= 0.8
+    return alert["ticker"] in TICKERS and alert["confidence"] >= 60 and alert["rvol"] >= 0.8
 
 
 # ── Message Building ──────────────────────────────────────────────────────────
