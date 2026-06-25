@@ -50,4 +50,4 @@ Write-Host "To run now for testing:" -ForegroundColor Yellow
 Write-Host "   Start-ScheduledTask -TaskName '$TaskName'" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "To remove:" -ForegroundColor Yellow
-Write-Host "   Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false" -ForegroundColor Yellow
+Write-Host '   Unregister-ScheduledTask -TaskName "TradingBot_OD_Aggregator" -Confirm:$false' -ForegroundColor Yellow
