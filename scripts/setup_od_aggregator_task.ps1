@@ -37,7 +37,7 @@ Register-ScheduledTask `
     -Action $Action `
     -Trigger $Trigger `
     -Settings $Settings `
-    -Description "Pre-market OD Aggregator Bot — fires at 9:05/9:20/9:35 ET, stops at 9:45 ET" `
+    -Description "Pre-market OD Aggregator Bot - fires at 9:05/9:20/9:35 ET, stops at 9:45 ET" `
     -RunLevel Highest `
     -Force | Out-Null
 
