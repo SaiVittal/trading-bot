@@ -1,0 +1,6 @@
+@echo off
+echo Installing Trading Bot scheduled tasks...
+echo Requesting Administrator privileges...
+powershell -Command "Start-Process powershell -ArgumentList '-ExecutionPolicy Bypass -File ""%~dp0scripts\setup_tasks.ps1""' -Verb RunAs -Wait"
+echo Done. Check the PowerShell window for results.
+pause
