@@ -40,7 +40,7 @@ STATE_FILE = STATE_DIR / f"od_state_{date.today()}.json"
 
 TICKERS = {
     "APP", "TSLA", "NVDA", "QQQ", "SPY", "META", "MSFT", "AMZN",
-    "AAPL", "INTC", "NOW", "HOOD", "PLTR", "NFLX", "NBIS",
+    "AAPL", "INTC", "NOW", "HOOD", "PLTR", "NFLX", "NBIS", "RKLB", "AMD", "IREN",
 }
 
 RUN_META = {
