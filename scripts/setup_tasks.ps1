@@ -3,7 +3,6 @@
 $Cross    = "C:\Users\sdlr2\Downloads\trading-bot\scripts\run_cross_alerts_now.ps1"
 $Signal   = "C:\Users\sdlr2\Downloads\trading-bot\scripts\run_signals_now.ps1"
 $RepoRoot = "C:\Users\sdlr2\Downloads\trading-bot"
-$Python   = "python"
 $Run      = "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File"
 
 function Make-Task {
@@ -31,10 +30,10 @@ Make-Task "TradingBot_PreMarket_0903"  "$Run `"$Signal`"" "09:03" $Days $null $n
 Make-Task "TradingBot_PreMarket_0918"  "$Run `"$Signal`"" "09:18" $Days $null $null
 Make-Task "TradingBot_PreMarket_0934"  "$Run `"$Signal`"" "09:34" $Days $null $null
 
-# OD Aggregator: 9:05, 9:20, 9:35 AM (runs Python script)
-$OD1 = "cmd /c `"cd /d $RepoRoot && $Python scripts\od_aggregator.py --run 1`""
-$OD2 = "cmd /c `"cd /d $RepoRoot && $Python scripts\od_aggregator.py --run 2`""
-$OD3 = "cmd /c `"cd /d $RepoRoot && $Python scripts\od_aggregator.py --run 3`""
+# OD Aggregator: 9:05, 9:20, 9:35 AM
+$OD1 = "$Run `"$RepoRoot\scripts\run_od_run1.ps1`""
+$OD2 = "$Run `"$RepoRoot\scripts\run_od_run2.ps1`""
+$OD3 = "$Run `"$RepoRoot\scripts\run_od_run3.ps1`""
 Make-Task "TradingBot_OD_Run1" $OD1 "09:05" $Days $null $null
 Make-Task "TradingBot_OD_Run2" $OD2 "09:20" $Days $null $null
 Make-Task "TradingBot_OD_Run3" $OD3 "09:35" $Days $null $null
