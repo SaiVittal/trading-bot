@@ -1,8 +1,9 @@
 """
 OD Aggregator Bot - Single-Run Mode
 =====================================
-Runs pre-market signals, parses OD sections from stdout,
-builds merged summary, sends to OD destination chat.
+Runs pre-market signals, parses OD=N from stdout,
+reconstructs OD details from available data,
+sends merged summary to OD destination chat.
 
 Usage:
     python scripts/od_aggregator.py --run 1   # 9:05 ET
@@ -10,15 +11,7 @@ Usage:
     python scripts/od_aggregator.py --run 3   # 9:35 ET FINAL
 """
 
-import os
-import sys
-import json
-import re
-import time
-import logging
-import argparse
-import subprocess
-import requests
+import os, sys, json, re, time, logging, argparse, subprocess, requests
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -26,13 +19,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-
-BOT_TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
+BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "8752800861:AAGUp376nhu0E-PoFhuKmx9-x572qUO95kw")
 DEST_CHAT_ID = os.environ.get("OD_DEST_CHAT_ID", "-5568744831")
 TG_API       = f"https://api.telegram.org/bot{BOT_TOKEN}"
 ET           = ZoneInfo("America/New_York")
-
 REPO_ROOT    = Path(__file__).resolve().parent.parent
 STATE_DIR    = REPO_ROOT / "state"
 STATE_FILE   = STATE_DIR / f"od_state_{date.today()}.json"
@@ -49,8 +39,6 @@ TICKERS = {
     "AAPL","INTC","NOW","HOOD","PLTR","NFLX","NBIS","RKLB","AMD","IREN",
 }
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("od_aggregator")
 
@@ -64,7 +52,6 @@ def load_state() -> dict:
         except Exception:
             pass
     return {"confirmed": {}}
-
 
 def save_state(state: dict) -> None:
     STATE_DIR.mkdir(exist_ok=True)
@@ -89,7 +76,6 @@ def tg_send(text: str, retries: int = 3) -> bool:
                 time.sleep(30)
     return False
 
-
 def tg_send_split(text: str) -> bool:
     LIMIT = 4096
     if len(text) <= LIMIT:
@@ -111,101 +97,104 @@ def tg_send_split(text: str) -> bool:
 # ── Signal Runner ─────────────────────────────────────────────────────────────
 
 def run_signals() -> str:
-    """Run the pre-market signals PS1 and return stdout."""
-    log.info("Running signals script: %s", SIGNALS_PS1)
+    log.info("Running: %s", SIGNALS_PS1)
     result = subprocess.run(
         ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(SIGNALS_PS1)],
-        capture_output=True, text=True, timeout=120
+        capture_output=True, text=True, timeout=180
     )
     output = result.stdout + result.stderr
-    log.info("Signals script complete. Output length: %d chars", len(output))
+    log.info("Done. Output: %d chars", len(output))
     return output
 
 # ── OD Signal Parser ──────────────────────────────────────────────────────────
 
 def parse_od_signals(output: str) -> list[dict]:
     """
-    Parse run_signals.ps1 stdout and extract OD signal blocks per ticker.
-    Returns list of alert dicts for tickers that have OD signals.
+    Parse run_signals stdout. Finds ticker blocks where OD >= 1,
+    extracts available fields and reconstructs OD alert dict.
+    stdout format per ticker:
+        --- TICKER ---
+          Price=X  RSI=X  RSI1m=X  EMA9=X  ATR=X
+          RVOL=Xx  VWAP=X  BBW=X  VolSpike=X  Trend=X
+          Daily: dRSI=X  dEMA9=X  dTrend=X
+          Sigs: OD=N 0DTE=N SW=N SC=N MO=N  TopConf=X%  Consensus=X  Dir=LONG/SHORT
     """
     alerts = []
 
-    # Split output into per-ticker blocks by "--- TICKER ---" headers
-    ticker_blocks = re.split(r"\n--- ([A-Z]{1,5}) ---\n", output)
+    # Split into per-ticker blocks
+    blocks = re.split(r"\n--- ([A-Z]{1,5}) ---\n", output)
 
-    # ticker_blocks = [pre, TICKER1, block1, TICKER2, block2, ...]
     i = 1
-    while i < len(ticker_blocks) - 1:
-        ticker = ticker_blocks[i].strip()
-        block  = ticker_blocks[i + 1]
+    while i < len(blocks) - 1:
+        ticker = blocks[i].strip()
+        block  = blocks[i + 1]
         i += 2
 
         if ticker not in TICKERS:
             continue
 
-        # Must have OD signal
-        if "OPENING DRIVE" not in block:
+        # Only process if OD signal fired
+        od_m = re.search(r"Sigs:.*?OD=(\d+)", block)
+        if not od_m or int(od_m.group(1)) == 0:
             continue
 
-        od_section_m = re.search(
-            r"--- OPENING DRIVE.*?---\n(.*?)(?=\n---|\Z)",
-            block, re.DOTALL
-        )
-        if not od_section_m:
+        # Extract fields from stdout
+        def get(pattern, cast=float, default=0.0):
+            m = re.search(pattern, block)
+            try:
+                return cast(m.group(1)) if m else default
+            except Exception:
+                return default
+
+        price     = get(r"Price=([\d.]+)")
+        atr       = get(r"ATR=([\d.]+)")
+        rvol      = get(r"RVOL=([\d.]+)x")
+        rsi       = get(r"RSI=([\d.]+)")
+        vwap      = get(r"VWAP=([\d.]+)")
+        confidence= get(r"TopConf=(\d+)%", int, 65)
+        direction = (re.search(r"Dir=(LONG|SHORT)", block) or type('', (), {'group': lambda s,x: 'LONG'})()).group(1)
+        trend     = (re.search(r"Trend=(UP|DOWN|NEUTRAL)", block) or type('', (), {'group': lambda s,x: 'NEUTRAL'})()).group(1)
+
+        if price == 0.0 or atr == 0.0:
+            log.warning("Skipping %s — missing price/ATR", ticker)
             continue
-        od_section = od_section_m.group(1)
 
-        # Signal code + description
-        sig_m = re.search(r"\[(S\d+)\]\s*(.+)", od_section)
-        if not sig_m:
-            continue
-        signal_code = f"[{sig_m.group(1)}]"
-        signal_desc = sig_m.group(2).strip()
+        # Reconstruct entry/stop/targets from ATR
+        if direction == "LONG":
+            stop = round(price - atr * 0.5, 2)
+            t1   = round(price + atr * 1.5, 2)
+            t2   = round(price + atr * 3.0, 2)
+            strike = int(round(price / 5 + 0.5) * 5)
+            option = f"CALL ${strike}"
+        else:
+            stop = round(price + atr * 0.5, 2)
+            t1   = round(price - atr * 1.5, 2)
+            t2   = round(price - atr * 3.0, 2)
+            strike = int(round(price / 5 - 0.5) * 5)
+            option = f"PUT ${strike}"
 
-        # Scorecard
-        sc_m = re.search(r"Scorecard\s*:\s*\[(\w+)\]", od_section)
-        scorecard = sc_m.group(1) if sc_m else "WATCH"
+        # Scorecard from confidence
+        if confidence >= 85:
+            scorecard = "BUY"
+        elif confidence >= 75:
+            scorecard = "STRONG"
+        elif confidence >= 65:
+            scorecard = "WATCH"
+        else:
+            scorecard = "CAUTION"
 
-        # Direction
-        dir_m = re.search(r"Direction\s*:\s*\[(\w+)\]\s*(\w+)", od_section)
-        direction = dir_m.group(2) if dir_m else "LONG"
-
-        # Option
-        opt_m = re.search(r"Option\s*:\s*(.+)", od_section)
-        option = opt_m.group(1).strip() if opt_m else ""
-
-        # Confidence
-        conf_m = re.search(r"Confidence\s*:\s*(\d+)%", od_section)
-        confidence = int(conf_m.group(1)) if conf_m else 65
-
-        # Entry / Stop
-        entry_m = re.search(r"Entry\(stk\)\s*:\s*\$([\d.]+)", od_section)
-        stop_m  = re.search(r"Stop\(stk\)\s*:\s*\$([\d.]+)", od_section)
-        entry = float(entry_m.group(1)) if entry_m else 0.0
-        stop  = float(stop_m.group(1))  if stop_m  else 0.0
-
-        # Targets
-        t1_m = re.search(r"Target 1\s*:\s*\$([\d.]+)", od_section)
-        t2_m = re.search(r"Target 2\s*:\s*\$([\d.]+)", od_section)
-        t1 = float(t1_m.group(1)) if t1_m else 0.0
-        t2 = float(t2_m.group(1)) if t2_m else 0.0
-
-        # Note
-        note_m = re.search(r"Note\s*:\s*(.+)", od_section)
-        note = note_m.group(1).strip() if note_m else ""
-
-        # RVOL from main block
-        rvol_m = re.search(r"RVOL\s*:\s*([\d.]+)x", block)
-        rvol = float(rvol_m.group(1)) if rvol_m else 1.0
+        vwap_pos = "above" if price > vwap else "below"
+        note = f"RVOL={rvol:.2f}x | {vwap_pos} VWAP=${vwap:.2f} | RSI={rsi:.1f} | Trend={trend}"
 
         alerts.append({
             "ticker": ticker, "direction": direction,
-            "signal_code": signal_code, "signal_desc": signal_desc,
+            "signal_code": "[OD]", "signal_desc": "Opening Drive Signal",
             "scorecard": scorecard, "confidence": confidence,
-            "option": option, "entry": entry, "stop": stop,
-            "t1": t1, "t2": t2, "note": note, "rvol": rvol,
+            "option": option, "entry": price,
+            "stop": stop, "t1": t1, "t2": t2,
+            "note": note, "rvol": rvol,
         })
-        log.info("Parsed OD signal: %s %s %s conf=%d%%", ticker, signal_code, direction, confidence)
+        log.info("Captured OD: %s %s conf=%d%% RVOL=%.2fx", ticker, direction, confidence, rvol)
 
     return alerts
 
@@ -229,20 +218,19 @@ def ticker_block(alert: dict, status: str) -> str:
         "--------------------------------------",
     ])
 
-
 def ranking_score(a: dict) -> int:
     score = 0
     if a["rvol"] >= 2.0: score += 2
-    if a["scorecard"] == "STRONG": score += 3
+    if a["scorecard"] == "BUY": score += 4
+    elif a["scorecard"] == "STRONG": score += 3
     elif a["scorecard"] == "WATCH": score += 1
     score += max(0, int(a["confidence"] / 10) - 7)
     return score
 
-
 def build_message(run_num: int, new_: dict, updated: dict, carried: dict) -> str:
     label, run_time, footer = RUN_META[run_num]
-    today_str = datetime.now(ET).strftime("%B %d, %Y")
-    total     = len(new_) + len(updated) + len(carried)
+    today_str  = datetime.now(ET).strftime("%B %d, %Y")
+    total      = len(new_) + len(updated) + len(carried)
     all_alerts = {**new_, **updated, **carried}
 
     lines = [
@@ -283,7 +271,7 @@ def build_message(run_num: int, new_: dict, updated: dict, carried: dict) -> str
         lines.append("------------------------------------")
         for i, a in enumerate(ranked[:3]):
             dir_e = "UP" if a["direction"] == "LONG" else "DN"
-            lines.append(f"{medals[i]} {a['ticker']} - {dir_e} | {a['signal_code']} | {a['scorecard']} | Conf {a['confidence']}% | RVOL {a['rvol']:.2f}x")
+            lines.append(f"{medals[i]} {a['ticker']} - {dir_e} | {a['scorecard']} | Conf {a['confidence']}% | RVOL {a['rvol']:.2f}x")
 
     lines.append(f"\n====================================")
     lines.append(f"{footer}")
@@ -299,38 +287,34 @@ def main():
     run_num = args.run
 
     now_et = datetime.now(ET)
-    log.info("OD Aggregator RUN %d started at %s ET", run_num, now_et.strftime("%H:%M"))
+    log.info("OD Aggregator RUN %d at %s ET", run_num, now_et.strftime("%H:%M"))
 
     if now_et.hour > 9 or (now_et.hour == 9 and now_et.minute >= 45):
         log.warning("Past 9:45 ET hard stop - aborting.")
         sys.exit(0)
 
-    # Run signals and parse OD alerts from output
-    output = run_signals()
-    current_alerts = parse_od_signals(output)
-    log.info("Found %d OD signals in output", len(current_alerts))
+    output  = run_signals()
+    current = parse_od_signals(output)
+    log.info("Found %d OD signals", len(current))
 
-    # Load cumulative state
     state     = load_state()
     confirmed = state.get("confirmed", {})
-
     new_: dict    = {}
     updated: dict = {}
     carried: dict = {}
 
-    for alert in current_alerts:
-        ticker = alert["ticker"]
-        if ticker in confirmed:
-            prev = confirmed[ticker]
-            if prev["signal_code"] != alert["signal_code"] or prev["direction"] != alert["direction"]:
-                updated[ticker] = alert
-            # same signal → will appear as carried
+    for alert in current:
+        t = alert["ticker"]
+        if t in confirmed:
+            prev = confirmed[t]
+            if prev["direction"] != alert["direction"]:
+                updated[t] = alert
         else:
-            new_[ticker] = alert
+            new_[t] = alert
 
-    for ticker, alert in confirmed.items():
-        if ticker not in new_ and ticker not in updated:
-            carried[ticker] = alert
+    for t, alert in confirmed.items():
+        if t not in new_ and t not in updated:
+            carried[t] = alert
 
     confirmed.update(new_)
     confirmed.update(updated)
@@ -338,10 +322,8 @@ def main():
     save_state(state)
 
     text = build_message(run_num, new_, updated, carried)
-    log.info("Sending RUN %d to %s...", run_num, DEST_CHAT_ID)
     tg_send_split(text)
-    log.info("RUN %d done. Confirmed: %s", run_num, list(confirmed.keys()))
-
+    log.info("RUN %d sent. Confirmed: %s", run_num, list(confirmed.keys()))
 
 if __name__ == "__main__":
     main()
