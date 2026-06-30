@@ -143,7 +143,7 @@ function Send-TG([string]$msg) {
             Invoke-RestMethod -Uri $url -Method POST -Body $bytes -ContentType "application/json; charset=utf-8" | Out-Null
             if ($total -gt 1) { Write-Host ("  TG part "+($i+1)+"/"+$total+" sent") }
         } catch { Write-Host ("TG-ERR: "+$_.Exception.Message) }
-        Start-Sleep -Milliseconds 700
+        Start-Sleep -Milliseconds 2000
     }
 }
 

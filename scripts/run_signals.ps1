@@ -207,7 +207,7 @@ function Send-TG([string]$msg) {
         } catch {
             Write-Host ("TG-ERR: "+$_.Exception.Message+" (part "+($i+1)+"/"+$total+", "+$chunks[$i].Length+" chars)")
         }
-        Start-Sleep -Milliseconds 900
+        Start-Sleep -Milliseconds 2000
     }
 }
 
