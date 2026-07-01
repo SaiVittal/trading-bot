@@ -17,13 +17,21 @@ function Make-Task {
     else { Write-Host "FAILED: $Name" -ForegroundColor Red }
 }
 
+function Make-MinuteTask {
+    param($Name, $Action, $StartTime, $EndTime, $IntervalMins)
+    schtasks /delete /tn $Name /f 2>$null
+    schtasks /create /tn $Name /tr $Action /sc minute /mo $IntervalMins /st $StartTime /et $EndTime /k /rl HIGHEST /f | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Host "OK: $Name" -ForegroundColor Green }
+    else { Write-Host "FAILED: $Name" -ForegroundColor Red }
+}
+
 $Days = "MON,TUE,WED,THU,FRI"
 
-# Cross Alerts: every 5 min from 9:30 AM for 6h30m (until 4:00 PM)
-Make-Task "TradingBot_CrossAlerts"     "$Run `"$Cross`""  "09:30" $Days 5  "0006:30"
+# Cross Alerts: every 5 min from 9:30 AM until 4:00 PM (MINUTE schedule - reliable repeat)
+Make-MinuteTask "TradingBot_CrossAlerts"     "$Run `"$Cross`""  "09:30" "16:00" 5
 
-# Intraday Signals: every 15 min from 10:00 AM for 5h45m (until 3:45 PM)
-Make-Task "TradingBot_IntradaySignals" "$Run `"$Signal`"" "10:00" $Days 15 "0005:45"
+# Intraday Signals: every 15 min from 10:00 AM until 3:45 PM (MINUTE schedule - reliable repeat)
+Make-MinuteTask "TradingBot_IntradaySignals" "$Run `"$Signal`"" "10:00" "15:45" 15
 
 # Pre-market signals: 9:03, 9:18, 9:34 AM
 Make-Task "TradingBot_PreMarket_0903"  "$Run `"$Signal`"" "09:03" $Days $null $null
