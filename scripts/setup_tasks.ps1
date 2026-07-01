@@ -21,8 +21,17 @@ function Make-MinuteTask {
     param($Name, $Action, $StartTime, $EndTime, $IntervalMins)
     schtasks /delete /tn $Name /f 2>$null
     schtasks /create /tn $Name /tr $Action /sc minute /mo $IntervalMins /st $StartTime /et $EndTime /k /rl HIGHEST /f | Out-Null
-    if ($LASTEXITCODE -eq 0) { Write-Host "OK: $Name" -ForegroundColor Green }
-    else { Write-Host "FAILED: $Name" -ForegroundColor Red }
+    if ($LASTEXITCODE -eq 0) {
+        # Remove battery restrictions via COM so task fires on battery too
+        $svc = New-Object -ComObject Schedule.Service
+        $svc.Connect()
+        $task = $svc.GetFolder("\").GetTask($Name)
+        $def  = $task.Definition
+        $def.Settings.DisallowStartIfOnBatteries = $false
+        $def.Settings.StopIfGoingOnBatteries     = $false
+        $svc.GetFolder("\").RegisterTaskDefinition($Name, $def, 4, $null, $null, 3) | Out-Null
+        Write-Host "OK: $Name (battery restriction removed)" -ForegroundColor Green
+    } else { Write-Host "FAILED: $Name" -ForegroundColor Red }
 }
 
 $Days = "MON,TUE,WED,THU,FRI"
