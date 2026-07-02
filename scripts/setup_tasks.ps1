@@ -20,7 +20,11 @@ function Make-Task {
 function Make-MinuteTask {
     param($Name, $Action, $StartTime, $EndTime, $IntervalMins)
     schtasks /delete /tn $Name /f 2>$null
-    schtasks /create /tn $Name /tr $Action /sc minute /mo $IntervalMins /st $StartTime /et $EndTime /k /rl HIGHEST /f | Out-Null
+    if ($EndTime) {
+        schtasks /create /tn $Name /tr $Action /sc minute /mo $IntervalMins /st $StartTime /et $EndTime /k /rl HIGHEST /f | Out-Null
+    } else {
+        schtasks /create /tn $Name /tr $Action /sc minute /mo $IntervalMins /st $StartTime /rl HIGHEST /f | Out-Null
+    }
     if ($LASTEXITCODE -eq 0) {
         # Remove battery restrictions via COM so task fires on battery too
         $svc = New-Object -ComObject Schedule.Service
@@ -36,11 +40,11 @@ function Make-MinuteTask {
 
 $Days = "MON,TUE,WED,THU,FRI"
 
-# Cross Alerts: every 5 min from 9:30 AM until 4:00 PM (MINUTE schedule - reliable repeat)
-Make-MinuteTask "TradingBot_CrossAlerts"     "$Run `"$Cross`""  "09:30" "16:00" 5
+# Cross Alerts: every 5 min, no end time (script exits if outside 9:30-16:00)
+Make-MinuteTask "TradingBot_CrossAlerts"     "$Run `"$Cross`""  "09:30" $null 5
 
-# Intraday Signals: every 15 min from 10:00 AM until 3:45 PM (MINUTE schedule - reliable repeat)
-Make-MinuteTask "TradingBot_IntradaySignals" "$Run `"$Signal`"" "10:00" "15:45" 15
+# Intraday Signals: every 15 min, no end time (script exits if outside 10:00-15:45)
+Make-MinuteTask "TradingBot_IntradaySignals" "$Run `"$Signal`"" "10:00" $null 15
 
 # Pre-market signals: 9:03, 9:18, 9:34 AM
 Make-Task "TradingBot_PreMarket_0903"  "$Run `"$Signal`"" "09:03" $Days $null $null
