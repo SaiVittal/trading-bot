@@ -5,6 +5,19 @@ $Signal   = "C:\Users\sdlr2\Downloads\trading-bot\scripts\run_signals_now.ps1"
 $RepoRoot = "C:\Users\sdlr2\Downloads\trading-bot"
 $Run      = "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File"
 
+function Remove-BatteryBlock {
+    param($Name)
+    try {
+        $svc = New-Object -ComObject Schedule.Service
+        $svc.Connect()
+        $task = $svc.GetFolder("\").GetTask($Name)
+        $def  = $task.Definition
+        $def.Settings.DisallowStartIfOnBatteries = $false
+        $def.Settings.StopIfGoingOnBatteries     = $false
+        $svc.GetFolder("\").RegisterTaskDefinition($Name, $def, 4, $null, $null, 3) | Out-Null
+    } catch { Write-Host "  Battery fix failed for $Name`: $_" -ForegroundColor Yellow }
+}
+
 function Make-Task {
     param($Name, $Action, $StartTime, $Days, $RepeatMins, $DurationHHMM)
     schtasks /delete /tn $Name /f 2>$null
@@ -13,8 +26,10 @@ function Make-Task {
     } else {
         schtasks /create /tn $Name /tr $Action /sc weekly /d $Days /st $StartTime /rl HIGHEST /f | Out-Null
     }
-    if ($LASTEXITCODE -eq 0) { Write-Host "OK: $Name" -ForegroundColor Green }
-    else { Write-Host "FAILED: $Name" -ForegroundColor Red }
+    if ($LASTEXITCODE -eq 0) {
+        Remove-BatteryBlock $Name
+        Write-Host "OK: $Name" -ForegroundColor Green
+    } else { Write-Host "FAILED: $Name" -ForegroundColor Red }
 }
 
 function Make-MinuteTask {
