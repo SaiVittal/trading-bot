@@ -3,7 +3,7 @@ $now = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::UtcNow, 
 $dow = $now.DayOfWeek
 if ($dow -eq 'Saturday' -or $dow -eq 'Sunday') { exit 0 }
 $t = $now.TimeOfDay
-if ($t -lt [TimeSpan]'10:00' -or $t -gt [TimeSpan]'15:45') { exit 0 }
+if ($t -lt [TimeSpan]'09:00' -or $t -gt [TimeSpan]'15:45') { exit 0 }
 
 & 'C:\Users\sdlr2\Downloads\trading-bot\scripts\run_signals.ps1' `
     -Tickers @('APP','TSLA','NVDA','QQQ','SPY','META','MSFT','AMZN','AAPL','INTC','NOW','HOOD','PLTR','NFLX','NBIS','RKLB','AMD','IREN','SOXL','TSLL','NVDL','TQQQ','JPM','C') `
