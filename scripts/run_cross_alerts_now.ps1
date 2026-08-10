@@ -6,7 +6,7 @@ $t = $now.TimeOfDay
 if ($t -lt [TimeSpan]'09:30' -or $t -gt [TimeSpan]'16:00') { exit 0 }
 
 & 'C:\Users\sdlr2\Downloads\trading-bot\scripts\run_cross_alerts.ps1' `
-    -Tickers @('APP','TSLA','NVDA','QQQ','SPY','META','MSFT','AMZN','AAPL','INTC','NOW','HOOD','PLTR','NFLX','NBIS','RKLB','AMD','IREN','GOOGL','IBM','ORCL','DELL','CRCL','SNOW','CRWV','CAVA','SMCI','COST') `
+    -Tickers @('APP','TSLA','NVDA','QQQ','SPY','META','MSFT','AMZN','AAPL','INTC','NOW','HOOD','PLTR','NFLX','NBIS','RKLB','AMD','IREN','GOOGL','IBM','ORCL','DELL','CRCL','SNOW','CRWV','CAVA','SMCI','COST','ASTS') `
     -ApiKey 'PKEQAQFOVYKIWW64RCEYJJD7N4' `
     -ApiSecret 'Hxc6xXX3VRc25t6mx1r3HEE9u5WzYVrucWjKVyw7j1u4' `
     -TelegramToken '8752800861:AAGUp376nhu0E-PoFhuKmx9-x572qUO95kw' `
