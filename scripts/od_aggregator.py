@@ -37,7 +37,7 @@ RUN_META = {
 TICKERS = {
     "APP","TSLA","NVDA","QQQ","SPY","META","MSFT","AMZN",
     "AAPL","INTC","NOW","HOOD","PLTR","NFLX","NBIS","RKLB","AMD","IREN",
-    "GOOGL","IBM","ORCL","DELL","CRCL","SNOW",
+    "GOOGL","IBM","ORCL","DELL","CRCL","SNOW","CRWV","CAVA","SMCI","COST",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
