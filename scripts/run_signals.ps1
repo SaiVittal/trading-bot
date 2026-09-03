@@ -206,6 +206,15 @@ function Send-TG([string]$msg) {
             if ($total -gt 1) { Write-Host ("  TG: Sent part "+($i+1)+"/"+$total) }
         } catch {
             Write-Host ("TG-ERR: "+$_.Exception.Message+" (part "+($i+1)+"/"+$total+", "+$chunks[$i].Length+" chars)")
+            # Retry once after 5s on rate limit
+            Start-Sleep -Seconds 5
+            try {
+                Invoke-RestMethod -Uri $tgUrl -Method POST -Body $bodyBytes `
+                    -ContentType "application/json; charset=utf-8" | Out-Null
+                Write-Host ("  TG: Retry OK part "+($i+1))
+            } catch {
+                Write-Host ("  TG: Retry failed: "+$_.Exception.Message)
+            }
         }
         Start-Sleep -Milliseconds 2000
     }
