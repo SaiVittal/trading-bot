@@ -58,8 +58,9 @@ $Days = "MON,TUE,WED,THU,FRI"
 # Cross Alerts: every 5 min, no end time (script exits if outside 9:30-16:00)
 Make-MinuteTask "TradingBot_CrossAlerts"     "$Run `"$Cross`""  "09:30" $null 5
 
-# Intraday Signals: every 15 min, no end time (script exits if outside 10:00-15:45)
-Make-MinuteTask "TradingBot_IntradaySignals" "$Run `"$Signal`"" "10:00" $null 15
+# Intraday Signals: every 20 min, no end time (script exits if outside 10:00-15:45)
+# 20 min interval prevents overlap: 23 tickers + 60s stagger takes ~15-18 min
+Make-MinuteTask "TradingBot_IntradaySignals" "$Run `"$Signal`"" "10:00" $null 20
 
 # Pre-market signals: 9:03, 9:18, 9:34 AM
 Make-Task "TradingBot_PreMarket_0903"  "$Run `"$Signal`"" "09:03" $Days $null $null
