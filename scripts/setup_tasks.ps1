@@ -48,8 +48,9 @@ function Make-MinuteTask {
         $def  = $task.Definition
         $def.Settings.DisallowStartIfOnBatteries = $false
         $def.Settings.StopIfGoingOnBatteries     = $false
+        $def.Settings.MultipleInstances          = 3  # 3 = Stop existing, start new
         $svc.GetFolder("\").RegisterTaskDefinition($Name, $def, 4, $null, $null, 3) | Out-Null
-        Write-Host "OK: $Name (battery restriction removed)" -ForegroundColor Green
+        Write-Host "OK: $Name (battery fix + stop-if-running applied)" -ForegroundColor Green
     } else { Write-Host "FAILED: $Name" -ForegroundColor Red }
 }
 
